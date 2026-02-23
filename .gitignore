@@ -1,0 +1,11 @@
+# Ignore everything by default
+*
+
+# Allow traversing directories
+!*/
+
+# Track Python source files
+!*.py
+
+# Track this ignore file so the rule is shared
+!.gitignore
