@@ -417,9 +417,77 @@ def build_values(cfg: SimConfig) -> dict[str, float | int | str]:
     }
 
 
+def run_variance_analysis(cfg: SimConfig) -> SimState:
+    setup_outputs(cfg)
+    xs, _x_plot, _t_plot, _u, mod_init, psi_init = compute_classical_reference(cfg)
+    dx = xs[1] - xs[0]
+
+    rt = build_runtime(cfg)
+    values = build_values(cfg)
+    initial_params, initial_params_source, initial_params_fit_time = resolve_initial_params_with_fallback(
+        cfg, rt, psi_init, mod_init
+    )
+    values["initial_params_source"] = initial_params_source
+    if initial_params_fit_time is not None:
+        values["initial_params_fit_time_s"] = float(initial_params_fit_time)
+
+    state = init_state(cfg, values, initial_params)
+
+    params_ref = initial_params.copy()
+    params_ref[0] = 1.0
+    n_params = rt.n_params
+    wires = rt.wires
+    circuits = fqi.get_circuits(params_ref[1:].tolist(), cfg.n, cfg.l)
+
+    qc1 = fqu.qisikit_to_quimb_inverse(circuits[0][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
+    qc2 = fqu.qisikit_to_quimb_inverse(circuits[1][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
+    qc3 = fqu.qisikit_to_quimb_inverse(circuits[2][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
+    qc4 = fqu.qisikit_to_quimb_inverse(circuits[3][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
+    qc5 = fqu.qisikit_to_quimb_inverse(circuits[4][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
+
+    grads3: list[float] = []
+    start = time.perf_counter()
+    for i in range(cfg.variance_tries):
+        params_rand = np.random.random(n_params + 1) * 2 * np.pi
+        params_rand[0] = 1.0
+        grad3 = fqu.whole_grad_param_shift(
+            params_rand, qc1, qc2, qc3, qc4, qc5, params_ref[0], wires, cfg.dt, dx, cfg.mu, cfg.n, cfg.l
+        )
+        grads3.extend(np.asarray(grad3[1:], dtype=float).tolist())
+        if cfg.verbose:
+            print(f"variance try = {i + 1}/{cfg.variance_tries}")
+    elapsed = time.perf_counter() - start
+
+    variance = float(np.var(grads3)) if grads3 else 0.0
+    state.values["variance"] = variance
+    state.values["variance_tries"] = int(cfg.variance_tries)
+    state.values["variance_num_samples"] = int(len(grads3))
+    state.values["variance_runtime_s"] = float(elapsed)
+    state.times.append(elapsed)
+    state.shots_per_timestep.append(0)
+    state.values["shots_used_per_timestep"] = [0]
+    state.values["shots_used_total"] = 0
+
+    np.save(cfg.data_dir / f"variance_{cfg.full_label}.npy", np.asarray(variance))
+    with (cfg.data_dir / f"values_{cfg.full_label}.yaml").open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(state.values, fh, sort_keys=False)
+
+    if cfg.verbose:
+        print(cfg.dir_label)
+        print(cfg.label)
+
+    return state
+
+
 def run_simulation(cfg: SimConfig) -> SimState:
+    if cfg.verbose:
+        print(cfg.dir_label)
+        print(cfg.label)
+        
+    if cfg.mode == "variance":
+        return run_variance_analysis(cfg)
     if cfg.mode not in STEPPERS:
-        raise ValueError(f"Unknown mode '{cfg.mode}'. Expected one of: {', '.join(STEPPERS)}")
+        raise ValueError(f"Unknown mode '{cfg.mode}'. Expected one of: {', '.join([*STEPPERS, 'variance'])}")
 
     setup_outputs(cfg)
     xs, _x_plot, _t_plot, u, mod_init, psi_init = compute_classical_reference(cfg)

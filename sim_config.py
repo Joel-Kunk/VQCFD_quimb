@@ -11,7 +11,7 @@ import yaml
 class SimConfig:
     label: str = "L3"
     dir_label: str = "N3"
-    mode: str = "noise_free"  # noise_free | adam_exact | adam_shots | cobyla_shots
+    mode: str = "noise_free"  # noise_free | adam_exact | adam_shots | cobyla_shots | variance
 
     n: int = 3
     l: int = 3
@@ -36,6 +36,8 @@ class SimConfig:
     expr_entcap_samples: int = 100000
     expr_bins: int = 100
 
+    variance_tries: int = 100
+    
     initial_params: tuple[float, ...] | None = None
     initial_params_presets_file: str = "initial_params_presets.yaml"
     initial_params_variant: str | None = None
