@@ -104,8 +104,43 @@ def build_runtime(cfg: SimConfig) -> RuntimeContext:
     )
 
 
-def init_state(cfg: SimConfig, values: list[float]) -> SimState:
-    prev = np.asarray(cfg.initial_params, dtype=float)
+def resolve_initial_params_with_fallback(
+    cfg: SimConfig,
+    rt: RuntimeContext,
+    psi_init: np.ndarray,
+    mod_init: float,
+) -> tuple[np.ndarray, str, float | None]:
+    try:
+        return np.asarray(cfg.resolve_initial_params(), dtype=float), ("override" if cfg.initial_params is not None else "preset"), None
+    except (FileNotFoundError, KeyError):
+        if cfg.initial_params is not None:
+            raise
+
+    if cfg.verbose:
+        print(
+            f"No initial-parameter preset found for (n={cfg.n}, l={cfg.l}); "
+            "running fallback initial fit optimization."
+        )
+
+    qc_t = fqu.qiskit_to_quimb_uni(fqi.circuit(cfg.n, cfg.l).assign_parameters(rt.seed_params), rt.seed_params)
+    initial_opt = qtn.TNOptimizer(
+        qc_t,
+        fqu.initial_cost_quimb,
+        loss_constants=dict(des=psi_init),
+        autodiff_backend="autograd",
+    )
+    start = time.perf_counter()
+    opt_initial = initial_opt.optimize(cfg.optimization_steps)
+    elapsed = time.perf_counter() - start
+
+    fitted_params = np.concatenate(
+        ([mod_init], np.concatenate([np.atleast_1d(v) for v in opt_initial.get_params().values()]))
+    )
+    return np.asarray(fitted_params, dtype=float), "optimized_fallback", elapsed
+
+
+def init_state(cfg: SimConfig, values: dict[str, float | int | str], initial_params: np.ndarray) -> SimState:
+    prev = np.asarray(initial_params, dtype=float)
     return SimState(prev_params_quimb=prev, params_list_quimb=[prev.copy()], values=values)
 
 
@@ -155,7 +190,8 @@ def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
     state.prev_params_quimb = next_params
     state.params_list_quimb.append(next_params.copy())
     state.cost_list.append(float(unitary_opt.loss_best))
-    np.save(cfg.data_dir / f"cost_iter_{cfg.label}_{step_idx}.npy", unitary_opt.losses)
+    state.shots_per_timestep.append(0)
+    np.save(cfg.data_dir / f"cost_iter_{cfg.full_label}_{step_idx}.npy", unitary_opt.losses)
 
 
 def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
@@ -223,10 +259,11 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             print(f"Iteration {t}/{cfg.max_iter}: Cost = {cost_iters[-1]}, Plat diff = {stop_crit:.3e}/{cfg.plat_tol}")
 
     state.params_list_quimb.append(curr_params.copy())
-    np.save(cfg.data_dir / f"cost_iters_{cfg.label}_{step_idx}.npy", np.asarray(cost_iters))
-    np.save(cfg.data_dir / f"params_iters_{cfg.label}_{step_idx}.npy", np.asarray(params_iters))
+    np.save(cfg.data_dir / f"cost_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(cost_iters))
+    np.save(cfg.data_dir / f"params_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(params_iters))
     state.cost_list.append(float(cost_iters[-1]))
     state.prev_params_quimb = curr_params.copy()
+    state.shots_per_timestep.append(0)
 
 
 def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
@@ -307,10 +344,12 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             print(f"Iteration {t}/{cfg.max_iter}: Cost = {cost_iters[-1]}, Plat diff = {stop_crit:.3e}/{cfg.plat_tol}")
 
     state.params_list_quimb.append(curr_params.copy())
-    np.save(cfg.data_dir / f"cost_iters_{cfg.label}_{step_idx}.npy", np.asarray(cost_iters))
-    np.save(cfg.data_dir / f"params_iters_{cfg.label}_{step_idx}.npy", np.asarray(params_iters))
+    np.save(cfg.data_dir / f"cost_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(cost_iters))
+    np.save(cfg.data_dir / f"params_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(params_iters))
     state.cost_list.append(float(cost_iters[-1]))
     state.prev_params_quimb = curr_params.copy()
+    shots_this_timestep = int(t * (10 * len(curr_params) - 5) * cfg.shots)
+    state.shots_per_timestep.append(shots_this_timestep)
 
 
 def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
@@ -351,8 +390,9 @@ def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: f
     state.num_evals.append(int(result.nfev))
     state.params_list_quimb.append(state.prev_params_quimb.copy())
     state.cost_list.append(float(result.fun))
-    np.save(cfg.data_dir / f"cost_iters_{cfg.label}_{step_idx}.npy", np.asarray(cost_iters))
-    np.save(cfg.data_dir / f"params_iters_{cfg.label}_{step_idx}.npy", np.asarray(params_iters))
+    state.shots_per_timestep.append(int(5 * cfg.shots * result.nfev))
+    np.save(cfg.data_dir / f"cost_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(cost_iters))
+    np.save(cfg.data_dir / f"params_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(params_iters))
 
 
 STEPPERS: dict[str, Callable[[SimConfig, SimState, RuntimeContext, float, int], None]] = {
@@ -363,19 +403,18 @@ STEPPERS: dict[str, Callable[[SimConfig, SimState, RuntimeContext, float, int], 
 }
 
 
-def build_values(cfg: SimConfig) -> list[float]:
-    return [
-        cfg.n,
-        cfg.l,
-        cfg.shots,
-        cfg.max_iter,
-        cfg.grad_tol,
-        cfg.t_total,
-        cfg.mu,
-        cfg.dt,
-        cfg.plat_tol,
-        cfg.patience,
-    ]
+def build_values(cfg: SimConfig) -> dict[str, float | int | str]:
+    return {
+        "n": cfg.n,
+        "l": cfg.l,
+        "shots": cfg.shots,
+        "max_iter": cfg.max_iter,
+        "t_total": cfg.t_total,
+        "mu": cfg.mu,
+        "dt": cfg.dt,
+        "plat_tol": cfg.plat_tol,
+        "patience": cfg.patience,
+    }
 
 
 def run_simulation(cfg: SimConfig) -> SimState:
@@ -385,22 +424,29 @@ def run_simulation(cfg: SimConfig) -> SimState:
     setup_outputs(cfg)
     xs, _x_plot, _t_plot, u, mod_init, psi_init = compute_classical_reference(cfg)
     dx = xs[1] - xs[0]
-    fpl.plot_calssical_evolution(xs, u, cfg.label, cfg.fig_dir)
+    fpl.plot_calssical_evolution(xs, u, cfg.full_label, cfg.fig_dir)
 
-    values = build_values(cfg)
     rt = build_runtime(cfg)
-    state = init_state(cfg, values)
+    values = build_values(cfg)
+    initial_params, initial_params_source, initial_params_fit_time = resolve_initial_params_with_fallback(
+        cfg, rt, psi_init, mod_init
+    )
+    values["initial_params_source"] = initial_params_source
+    if initial_params_fit_time is not None:
+        values["initial_params_fit_time_s"] = float(initial_params_fit_time)
+
+    state = init_state(cfg, values, initial_params)
 
     if cfg.compute_expr_cap:
         circ = fex.unitary_pure(cfg.n, cfg.l)
-        exp_and_cap = fex.expr_and_ent_cap(circ, cfg.expr_samples, cfg.entcap_samples)
-        state.values.append(float(exp_and_cap[0]))
-        state.values.append(float(exp_and_cap[1]))
+        exp_and_cap = fex.expr_and_ent_cap(circ, cfg.expr_entcap_samples, cfg.expr_bins)
+        state.values["expressibility"] = float(exp_and_cap[0])
+        state.values["entangling_capability"] = float(exp_and_cap[1])
 
     initial_fit_mse = fpl.plot_initialfit(
-        xs, mod_init, psi_init, state.prev_params_quimb, cfg.n, cfg.l, cfg.n_total, cfg.label, cfg.fig_dir
+        xs, mod_init, psi_init, state.prev_params_quimb, cfg.n, cfg.l, cfg.n_total, cfg.full_label, cfg.fig_dir
     )
-    state.values.append(float(initial_fit_mse))
+    state.values["initial_fit_mse"] = float(initial_fit_mse)
 
     stepper = STEPPERS[cfg.mode]
     for i in range(cfg.n_timesteps):
@@ -410,15 +456,19 @@ def run_simulation(cfg: SimConfig) -> SimState:
         stepper(cfg, state, rt, dx, i)
         state.times.append(time.perf_counter() - start)
 
-    fpl.plot_final(xs, u[:, -1], state.params_list_quimb[-1], cfg.n, cfg.l, cfg.n_total, cfg.label, cfg.fig_dir)
-    fpl.plot_evolution(xs, state.params_list_quimb, cfg.n, cfg.l, cfg.n_total, cfg.label, cfg.fig_dir)
+    state.values["shots_used_per_timestep"] = [int(x) for x in state.shots_per_timestep]
+    state.values["shots_used_total"] = int(sum(state.shots_per_timestep))
 
-    np.save(cfg.data_dir / f"params_{cfg.label}.npy", np.asarray(state.params_list_quimb))
-    np.save(cfg.data_dir / f"costs_{cfg.label}.npy", np.asarray(state.cost_list))
-    np.save(cfg.data_dir / f"times_{cfg.label}.npy", np.asarray(state.times))
-    np.save(cfg.data_dir / f"values_{cfg.label}.npy", np.asarray(state.values))
+    fpl.plot_final(xs, u[:, -1], state.params_list_quimb[-1], cfg.n, cfg.l, cfg.n_total, cfg.full_label, cfg.fig_dir)
+    fpl.plot_evolution(xs, state.params_list_quimb, cfg.n, cfg.l, cfg.n_total, cfg.full_label, cfg.fig_dir)
+
+    np.save(cfg.data_dir / f"params_{cfg.full_label}.npy", np.asarray(state.params_list_quimb))
+    np.save(cfg.data_dir / f"costs_{cfg.full_label}.npy", np.asarray(state.cost_list))
+    np.save(cfg.data_dir / f"times_{cfg.full_label}.npy", np.asarray(state.times))
+    with (cfg.data_dir / f"values_{cfg.full_label}.yaml").open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(state.values, fh, sort_keys=False)
     if state.num_evals:
-        np.save(cfg.data_dir / f"num_evals_{cfg.label}.npy", np.asarray(state.num_evals))
+        np.save(cfg.data_dir / f"num_evals_{cfg.full_label}.npy", np.asarray(state.num_evals))
 
     if cfg.verbose:
         print(cfg.dir_label)

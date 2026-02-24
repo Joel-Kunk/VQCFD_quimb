@@ -4,13 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-
-
-DEFAULT_INITIAL_PARAMS = (
-    1.87082869, 1.69994981, 2.60121564, 2.06343492, 2.16748982,
-        2.16757722, 3.32352347, 3.28004099, 3.8192506 , 3.33380867,
-        2.45316203, 2.3847443 , 2.76385659
-)
+import yaml
 
 
 @dataclass(slots=True)
@@ -21,30 +15,33 @@ class SimConfig:
 
     n: int = 3
     l: int = 3
-    shots: int = 125000
-    max_iter: int = 50
-    grad_tol: float = 1e-3
-    plat_tol: float = 0.0
-    patience: int = 15
-
     t_total: float = 0.29
     mu: float = 0.01
     dt: float = 0.01
 
     optimization_steps: int = 1000
+
+    max_iter: int = 100
+    grad_tol: float = 1e-3
+    plat_tol: float = 0.00015
+    patience: int = 15
+
+    shots: int = 100
     cobyla_tol: float = 1e-5
     cobyla_maxiter: int = 100000
 
-    init_param_random_scale: float = 0.1
-    init_param_random_center: float = np.pi - 0.25
-    random_seed: int | None = None
     verbose: bool = True
 
     compute_expr_cap: bool = False
-    expr_samples: int = 100000
-    entcap_samples: int = 100
+    expr_entcap_samples: int = 100000
+    expr_bins: int = 100
 
-    initial_params: tuple[float, ...] = DEFAULT_INITIAL_PARAMS
+    initial_params: tuple[float, ...] | None = None
+    initial_params_presets_file: str = "initial_params_presets.yaml"
+    initial_params_variant: str | None = None
+    init_param_random_scale: float = 0.1
+    init_param_random_center: float = np.pi - 0.25
+    random_seed: int | None = None
 
     @property
     def results_dir(self) -> Path:
@@ -60,7 +57,11 @@ class SimConfig:
 
     @property
     def manifest_path(self) -> Path:
-        return self.results_dir / f"manifest_{self.label}.yaml"
+        return self.results_dir / f"manifest_{self.full_label}.yaml"
+
+    @property
+    def full_label(self) -> str:
+        return f"{self.dir_label}_{self.label}"
 
     @property
     def n_total(self) -> int:
@@ -69,3 +70,63 @@ class SimConfig:
     @property
     def n_timesteps(self) -> int:
         return int(self.t_total / self.dt)
+
+    @property
+    def initial_params_presets_path(self) -> Path:
+        return Path(self.initial_params_presets_file)
+
+    def resolve_initial_params(self) -> tuple[float, ...]:
+        if self.initial_params is not None:
+            return tuple(float(x) for x in self.initial_params)
+
+        presets_path = self.initial_params_presets_path
+        if not presets_path.exists():
+            raise FileNotFoundError(
+                f"Initial parameter preset file not found: {presets_path}. "
+                "Set `initial_params` explicitly or create the presets YAML."
+            )
+
+        with presets_path.open("r", encoding="utf-8") as fh:
+            presets = yaml.safe_load(fh) or {}
+
+        n_key_int = self.n
+        n_key_str = str(self.n)
+        l_key_int = self.l
+        l_key_str = str(self.l)
+
+        by_n = presets.get(n_key_int, presets.get(n_key_str))
+        if by_n is None:
+            raise KeyError(
+                f"No initial parameter presets found for n={self.n} in {presets_path}."
+            )
+
+        entry = by_n.get(l_key_int, by_n.get(l_key_str))
+        if entry is None:
+            raise KeyError(
+                f"No initial parameter preset found for (n={self.n}, l={self.l}) in {presets_path}."
+            )
+
+        if isinstance(entry, dict):
+            if self.initial_params_variant is not None:
+                variants = entry.get("variants", {})
+                variant_entry = variants.get(self.initial_params_variant)
+                if variant_entry is None:
+                    raise KeyError(
+                        f"Variant '{self.initial_params_variant}' not found for (n={self.n}, l={self.l}) in {presets_path}."
+                    )
+                if isinstance(variant_entry, dict):
+                    params = variant_entry.get("params")
+                else:
+                    params = variant_entry
+            else:
+                params = entry.get("default")
+                if params is None and "params" in entry:
+                    params = entry["params"]
+                if params is None:
+                    raise KeyError(
+                        f"Preset entry for (n={self.n}, l={self.l}) has no 'default' params in {presets_path}."
+                    )
+        else:
+            params = entry
+
+        return tuple(float(x) for x in params)

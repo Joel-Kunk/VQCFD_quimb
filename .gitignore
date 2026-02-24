@@ -6,6 +6,7 @@
 
 # Track Python source files
 !*.py
+!initial_params_presets.yaml
 
 # Track this ignore file so the rule is shared
 !.gitignore

@@ -11,5 +11,6 @@ class SimState:
     params_list_quimb: list[np.ndarray] = field(default_factory=list)
     cost_list: list[float] = field(default_factory=list)
     times: list[float] = field(default_factory=list)
-    values: list[float] = field(default_factory=list)
+    values: dict[str, object] = field(default_factory=dict)
     num_evals: list[int] = field(default_factory=list)
+    shots_per_timestep: list[int] = field(default_factory=list)
