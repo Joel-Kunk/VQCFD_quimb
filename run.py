@@ -1,26 +1,64 @@
 from simulation_runner import SimConfig, run_simulation
 
 
-def main() -> None:
-    cfg = SimConfig(
-        label="N4L2",
-        dir_label="var",
-        n=4,
-        l=2,
-        mode="variance",
-        variance_tries=200,
+def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
+    return SimConfig(
+        n=n,
+        l=l,
+        dir_label=f"N{n}",
+        label=f"L{l}",
+        **overrides,
     )
-    run_simulation(cfg)
+
+
+def main() -> None:
+    run_mode = "grid"  # "single" | "pairs" | "grid"
+
+    # Common options applied to every run.
+    common = dict(
+        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
+        compute_expr_cap=True,
+    )
+
+    if run_mode == "single":
+        cfg = SimConfig(
+            n=3,
+            l=2,
+            dir_label="N3",
+            label="L2_custom",
+            **common,
+        )
+        run_simulation(cfg)
+        return
+
+    if run_mode == "pairs":
+        pairs = [
+            (3, 2),
+            (4, 2),
+            (5, 2),
+        ]
+        todo = pairs
+    elif run_mode == "grid":
+        ns = [5]
+        ls = [1, 2, 3, 4, 5, 6]
+        todo = [(n, l) for n in ns for l in ls]
+    else:
+        raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")
+
+    failures: list[tuple[int, int, str]] = []
+    for n, l in todo:
+        print(f"\n=== Running N={n}, L={l} ===")
+        try:
+            cfg = build_sweep_cfg(n=n, l=l, **common)
+            run_simulation(cfg)
+        except Exception as exc:  # keep sweep running if one pair fails
+            failures.append((n, l, str(exc)))
+            print(f"FAILED N={n}, L={l}: {exc}")
+
+    print(f"\nSweep finished. total={len(todo)}, failed={len(failures)}")
+    for n, l, msg in failures:
+        print(f" - N={n}, L={l}: {msg}")
 
 
 if __name__ == "__main__":
     main()
-
-# here for test runs
-        # label="L2test",
-        # dir_label="N2",
-        # n=2,
-        # l=2,
-        # mode="noise_free",
-        # t_total=0.2,
-        # dt = 0.05,

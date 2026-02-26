@@ -6,6 +6,7 @@
 
 # Track Python source files
 !*.py
+!*.ipynb
 !initial_params_presets.yaml
 !requirements.txt
 
