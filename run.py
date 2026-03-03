@@ -12,20 +12,22 @@ def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
 
 
 def main() -> None:
-    run_mode = "grid"  # "single" | "pairs" | "grid"
+    run_mode = "single"  # "single" | "pairs" | "grid"
 
     # Common options applied to every run.
     common = dict(
-        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
-        compute_expr_cap=True,
+        mode="variance",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
+        compute_expr_cap=False,
     )
 
     if run_mode == "single":
         cfg = SimConfig(
-            n=3,
-            l=2,
-            dir_label="N3",
-            label="L2_custom",
+            n=8,
+            l=1,
+            dir_label="var",
+            label="N8L1",
+            variance_tries=1000,
+            t_total=0.01,
             **common,
         )
         run_simulation(cfg)
