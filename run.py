@@ -16,18 +16,16 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="variance",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
+        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
         compute_expr_cap=False,
     )
 
     if run_mode == "single":
         cfg = SimConfig(
-            n=8,
-            l=1,
-            dir_label="var",
-            label="N8L1",
-            variance_tries=1000,
-            t_total=0.01,
+            n=3,
+            l=2,
+            dir_label="test",
+            label="N3_L2",
             **common,
         )
         run_simulation(cfg)
@@ -41,8 +39,8 @@ def main() -> None:
         ]
         todo = pairs
     elif run_mode == "grid":
-        ns = [5]
-        ls = [1, 2, 3, 4, 5, 6]
+        ns = [3,4,5,6]
+        ls = [5]
         todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")

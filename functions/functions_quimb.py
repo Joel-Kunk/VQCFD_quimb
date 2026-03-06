@@ -97,6 +97,9 @@ def qisikit_to_quimb_inverse(qc,num_params,num_U_gates,prev_params):
             qcn.apply_gate(gate.upper(),qubits=qubits_for_quimb,params=(prev_params[par_counter],))
             gate_num = gate_num + 1
             par_counter = par_counter + 1
+        elif gate == 'mcx':
+            qcn.apply_gate('X', qubits = (qubits_for_quimb[-1],), controls = qubits_for_quimb[:-1])
+            gate_num = gate_num + 1
         else:
             qcn.apply_gate(gate.upper(),qubits=qubits_for_quimb)
             gate_num = gate_num + 1        

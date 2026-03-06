@@ -16,7 +16,7 @@ def unitary(qubits, layers):
             j += 1
             qc.cry(theta, qubits, i)
         for i in range(qubits-1):
-            qc.ccx(qubits,i, i+1)
+            qc.cx(i, i+1)
     for i in range(qubits):
         theta = Parameter('theta'+str(j))
         j += 1
@@ -123,6 +123,14 @@ def adder(n):
         qc.ccx(mr[0], qr[0], ar[0])
     return qc
 
+# def adder(n):
+#     qc = QuantumCircuit(n+1)
+#     qc.cx(-1, 0)
+#     for i in range(n-1):
+#         control = list(range(i + 1))
+#         qc.mcx(control_qubits=control, target_qubit=[i+1], ctrl_state='1'*len(control))
+#     return qc
+
 def U_A_Ut(prev_params, qubits, layers, A_dagger=False):
     n = qubits
     t = n+1+n-2
@@ -147,6 +155,30 @@ def U_A_Ut(prev_params, qubits, layers, A_dagger=False):
     # qc.barrier()
     qc.h(-1)
     return qc
+
+# def U_A_Ut(prev_params, qubits, layers, A_dagger=False):
+#     n = qubits
+#     t = n+1
+#     qc = QuantumCircuit(t)
+#     qc.h(-1)
+#     # qc.barrier()
+#     # U
+#     U_curr = unitary(qubits, layers)#.assign_parameters(curr_params)
+#     qc = qc.compose(U_curr)
+#     # qc.barrier()
+#     # Adder
+#     if A_dagger:
+#         A = adder(qubits).inverse()
+#     else:
+#         A = adder(qubits)
+#     qc = qc.compose(A)
+#     # qc.barrier()
+#     # U_tilda
+#     U_prev = unitary(qubits, layers).assign_parameters(prev_params).inverse()
+#     qc = qc.compose(U_prev)
+#     # qc.barrier()
+#     qc.h(-1)
+#     return qc
 
 def U_Dt_A_Ut(prev_params, qubits, layers, A_dagger=False):
     n = qubits
@@ -182,6 +214,42 @@ def U_Dt_A_Ut(prev_params, qubits, layers, A_dagger=False):
     # qc.barrier()
     qc.h(-1)
     return qc
+
+# def U_Dt_A_Ut(prev_params, qubits, layers, A_dagger=False):
+#     n = qubits
+#     total_qubits = 1 + n + n
+#     t = np.arange(total_qubits)
+#     qc = QuantumCircuit(total_qubits)
+#     qc.h(-1)
+#     # qc.barrier()
+#     # U
+#     U_curr = unitary(qubits, layers)#.assign_parameters(curr_params)
+#     U_assign = t[-(n+1):]
+#     qc = qc.compose(U_curr, U_assign)
+#     # qc.barrier()
+#     # Diagonal
+#     for i in range(n):
+#         #qc.ccx(-1, i+n+1, i)
+#         qc.ccx(2*n,i+n, i)
+#     U_prev = unitary(qubits, layers).assign_parameters(prev_params).inverse()
+#     D_assign = np.concat((t[:n], t[-1:]))
+#     qc = qc.compose(U_prev, D_assign)
+#     # qc.barrier()
+#     # Adder
+#     if A_dagger:
+#         A = adder(qubits).inverse()
+#     else:
+#         A = adder(qubits)
+#     A_assign = U_assign
+#     qc = qc.compose(A, A_assign)
+#     # qc.barrier()
+#     # Ut
+#     U_prev = unitary(qubits, layers).assign_parameters(prev_params).inverse()
+#     qc = qc.compose(U_prev, U_assign)
+#     # qc.barrier()
+#     qc.h(-1)
+#     return qc
+
 
 # Create a function which returns the circuits, hamiltonians
 def get_circuits(prev_c_params, qubits, layers):
