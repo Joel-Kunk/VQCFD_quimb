@@ -11,6 +11,9 @@ def make_state_circuit(qubits, layers, params):
 def make_optimization_unitary(qubits, layers, params_insert, lbd0):
     return fcq.make_optimization_unitary(qubits, layers, params_insert, lbd0)
 
+def make_optimization_unitary2(qubits, layers, params_insert, lbd0):
+    return fcq.make_optimization_unitary2(qubits, layers, params_insert, lbd0)
+
 
 def make_inverse_reference_circuits(prev_params, qubits, layers):
     return fcq.make_inverse_reference_circuits(prev_params, qubits, layers)
@@ -41,25 +44,6 @@ def cost_quimb(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu):
     
     return anp.real(cost).astype(anp.float64).reshape(())
 
-
-def cost_quimb_no_restriction(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu):
-
-    c1 = embed_circuit(unitary,qc1,wires).local_expectation(qu.pauli('Z'), 0)
-    c2 = embed_circuit(unitary,qc2,wires).local_expectation(qu.pauli('Z'), 0)
-    c3 = embed_circuit(unitary,qc3,wires).local_expectation(qu.pauli('Z'), 0)
-    c4 = embed_circuit(unitary,qc4,wires).local_expectation(qu.pauli('Z'), 0)
-    c5 = embed_circuit(unitary,qc5,wires).local_expectation(qu.pauli('Z'), 0)
-
-    lbd0 = unitary.gates[-1].params[0]
-
-    cost = anp.abs(lbd0)**2 - 2*anp.real(anp.conjugate(lbd0_t)*lbd0*
-                                       (
-                                           c1 + ((dt*mu/(dx**2)) * (c2 - 2*c1 + c3))
-                                           - ((dt * anp.conjugate(lbd0_t)/(2*dx))*(c4 - c5)) 
-                                           )
-                                       ) + np.abs(lbd0_t)**2
-    
-    return anp.real(cost).astype(anp.float64).reshape(())
 
 
 def initial_cost_quimb(qc,des):
@@ -304,17 +288,70 @@ def grad_mod_shots(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots):
     
     return anp.real(cost).astype(anp.float64).reshape(())
 
-def whole_grad_param_shift(params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,N,L):
+def build_local_exp_tree(unitary, qc, wires):
+    circ = embed_circuit(unitary, qc, wires)
+
+    info = circ.local_expectation(
+        qu.pauli('Z'),
+        0,
+        simplify_sequence="",
+        rehearse=True,
+    )
+    return info["tree"]
+
+def cost_quimb_cached(unitary, qc1, qc2, qc3, qc4, qc5,
+                      lbd0_t,lbd0, wires, dt, dx, mu, trees):
+
+    c1 = embed_circuit(unitary, qc1, wires).local_expectation(
+        qu.pauli('Z'), 0,
+        simplify_sequence="",
+        optimize=trees[0],
+    )
+    c2 = embed_circuit(unitary, qc2, wires).local_expectation(
+        qu.pauli('Z'), 0,
+        simplify_sequence="",
+        optimize=trees[1],
+    )
+    c3 = embed_circuit(unitary, qc3, wires).local_expectation(
+        qu.pauli('Z'), 0,
+        simplify_sequence="",
+        optimize=trees[2],
+    )
+    c4 = embed_circuit(unitary, qc4, wires).local_expectation(
+        qu.pauli('Z'), 0,
+        simplify_sequence="",
+        optimize=trees[3],
+    )
+    c5 = embed_circuit(unitary, qc5, wires).local_expectation(
+        qu.pauli('Z'), 0,
+        simplify_sequence="",
+        optimize=trees[4],
+    )
+
+
+    cost = (
+        abs(lbd0)**2
+        - 2 * (lbd0_t.conjugate() * lbd0 * (
+            c1
+            + (dt * mu / dx**2) * (c2 - 2*c1 + c3)
+            - (dt * lbd0_t.conjugate() / (2*dx)) * (c4 - c5)
+        )).real
+        + abs(lbd0_t)**2
+    )
+
+    return float(cost.real)
+
+def whole_grad_param_shift(params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,N,L,trees):
     grad = np.zeros(len(params))
     for i in range(1,len(params)):
         params_p = params.copy()
         params_m = params.copy()
         params_p[i] += np.pi/2
         params_m[i] -= np.pi/2
-        uni_p = make_optimization_unitary(N, L, params_p[1:], lbd0=params[0])
-        uni_m = make_optimization_unitary(N, L, params_m[1:], lbd0=params[0])
-        cost_p = cost_quimb(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu)
-        cost_m = cost_quimb(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu)
+        uni_p = make_optimization_unitary2(N, L, params_p[1:], lbd0=params[0])
+        uni_m = make_optimization_unitary2(N, L, params_m[1:], lbd0=params[0])
+        cost_p = cost_quimb_cached(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
+        cost_m = cost_quimb_cached(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
         grad[i] = (cost_p - cost_m)/2
     
     grad[1:-1] /= np.sqrt(2)

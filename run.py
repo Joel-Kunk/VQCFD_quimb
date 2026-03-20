@@ -25,7 +25,7 @@ def main() -> None:
             n=3,
             l=2,
             dir_label="test",
-            label="var_N3_L2",
+            label="var_N3_L2_2",
             variance_tries=500,
             **common,
         )

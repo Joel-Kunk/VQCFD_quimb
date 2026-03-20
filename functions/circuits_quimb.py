@@ -72,6 +72,12 @@ def make_optimization_unitary(qubits: int, layers: int, params: np.ndarray | lis
     qc.apply_gate("RY", qubits=(qubits + 1,), params=(float(lbd0),), parametrize=True)
     return qc
 
+def make_optimization_unitary2(qubits: int, layers: int, params: np.ndarray | list[float], lbd0: float) -> qtn.Circuit:
+    qc = qtn.Circuit(qubits + 1)
+    apply_unitary_inverse(qc, qubits, layers, params)
+    qc.apply_gate("H", qubits=(0,))
+    return qc
+
 
 def _adder_gate_specs(n: int):
     if n <= 1:

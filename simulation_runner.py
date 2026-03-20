@@ -426,13 +426,24 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
     n_params = rt.n_params
     qc1, qc2, qc3, qc4, qc5 = fqu.make_inverse_reference_circuits(params_ref[1:], cfg.n, cfg.l)
 
+    unitary0 = fcq.make_optimization_unitary2(cfg.n, cfg.l, params_ref[1:], params_ref[0])
+
+    trees = [
+    fqu.build_local_exp_tree(unitary0, qc1, wires),
+    fqu.build_local_exp_tree(unitary0, qc2, wires),
+    fqu.build_local_exp_tree(unitary0, qc3, wires),
+    fqu.build_local_exp_tree(unitary0, qc4, wires),
+    fqu.build_local_exp_tree(unitary0, qc5, wires),
+]
+
     grads3: list[float] = []
     start = time.perf_counter()
+
     for i in range(cfg.variance_tries):
         params_rand = np.random.random(n_params + 1) * 2 * np.pi
         params_rand[0] = 1.0
         grad3 = fqu.whole_grad_param_shift(
-            params_rand, qc1, qc2, qc3, qc4, qc5, params_ref[0], wires, cfg.dt, dx, cfg.mu, cfg.n, cfg.l
+            params_rand, qc1, qc2, qc3, qc4, qc5, params_ref[0], wires, cfg.dt, dx, cfg.mu, cfg.n, cfg.l,trees
         )
         grads3.extend(np.asarray(grad3[1:], dtype=float).tolist())
         if cfg.verbose:
@@ -450,6 +461,7 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
     state.values["shots_used_total"] = 0
 
     np.save(cfg.data_dir / f"variance_{cfg.full_label}.npy", np.asarray(variance))
+    np.save(cfg.data_dir / f"variance_grads_{cfg.full_label}.npy", np.asarray(grads3, dtype=float))
     with (cfg.data_dir / f"values_{cfg.full_label}.yaml").open("w", encoding="utf-8") as fh:
         yaml.safe_dump(state.values, fh, sort_keys=False)
 
