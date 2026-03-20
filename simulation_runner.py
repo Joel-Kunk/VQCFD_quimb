@@ -8,8 +8,8 @@ import numpy as np
 import quimb.tensor as qtn
 from scipy.optimize import minimize
 
+import functions.circuits_quimb as fcq
 import functions.expr_entcap as fex
-import functions.functions_qiskit as fqi
 import functions.functions_quimb as fqu
 import functions.plots as fpl
 from sim_config import SimConfig
@@ -24,11 +24,10 @@ except ImportError as exc:  # pragma: no cover
 @dataclass(slots=True)
 class RuntimeContext:
     seed_params: list[float]
-    circuits: list
     wires: tuple[int, ...]
     n_params: int
-    num_gates_in_u: int
-    base_unitary: object
+    n: int
+    l: int
 
 
 def ensure_dirs(cfg: SimConfig) -> None:
@@ -84,23 +83,19 @@ def build_runtime(cfg: SimConfig) -> RuntimeContext:
     if cfg.random_seed is not None:
         np.random.seed(cfg.random_seed)
 
-    fpl.plot_unitary(fqi.unitary(cfg.n, cfg.l), cfg.fig_dir)
-    n_params = fqi.circuit(cfg.n, cfg.l).num_parameters
+    fpl.plot_unitary(cfg.n, cfg.l, cfg.fig_dir)
+    n_params = fcq.num_unitary_parameters(cfg.n, cfg.l)
     seed_params = (
         (np.random.random(n_params) * cfg.init_param_random_scale + cfg.init_param_random_center).tolist()
     )
-    circuits = fqi.get_circuits(seed_params, cfg.n, cfg.l)
     wires = tuple(range(cfg.n + 1))
-    base_unitary = fqi.unitary(cfg.n, cfg.l)
-    num_gates_in_u = len(fqi.circuit(cfg.n, cfg.l).data) - 1
 
     return RuntimeContext(
         seed_params=seed_params,
-        circuits=circuits,
         wires=wires,
         n_params=n_params,
-        num_gates_in_u=num_gates_in_u,
-        base_unitary=base_unitary,
+        n=cfg.n,
+        l=cfg.l,
     )
 
 
@@ -122,7 +117,7 @@ def resolve_initial_params_with_fallback(
             "running fallback initial fit optimization."
         )
 
-    qc_t = fqu.qiskit_to_quimb_uni(fqi.circuit(cfg.n, cfg.l).assign_parameters(rt.seed_params), rt.seed_params)
+    qc_t = fqu.make_state_circuit(cfg.n, cfg.l, rt.seed_params)
     initial_opt = qtn.TNOptimizer(
         qc_t,
         fqu.initial_cost_quimb,
@@ -145,19 +140,11 @@ def init_state(cfg: SimConfig, values: dict[str, float | int | str], initial_par
 
 
 def _build_inverse_circuits(cfg: SimConfig, rt: RuntimeContext, prev_params_quimb: np.ndarray) -> list:
-    return [
-        fqu.qisikit_to_quimb_inverse(
-            rt.circuits[k][0].assign_parameters(rt.seed_params),
-            rt.n_params,
-            rt.num_gates_in_u,
-            prev_params_quimb[1:],
-        )
-        for k in range(5)
-    ]
+    return fqu.make_inverse_reference_circuits(prev_params_quimb[1:], cfg.n, cfg.l)
 
 
 def _make_quimb_unitary(rt: RuntimeContext, prev_params_quimb: np.ndarray):
-    return fqu.qiskit_to_quimb_unitary(rt.base_unitary, prev_params_quimb[1:], prev_params_quimb[0])
+    return fqu.make_optimization_unitary(rt.n, rt.l, prev_params_quimb[1:], prev_params_quimb[0])
 
 
 def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
@@ -235,7 +222,7 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
         )
 
         curr_params, m, v = fqu.adam_update(curr_params, grad, m, v, t)
-        quimb_unitary = fqu.qiskit_to_quimb_unitary(rt.base_unitary, curr_params[1:], curr_params[0])
+        quimb_unitary = fqu.make_optimization_unitary(rt.n, rt.l, curr_params[1:], curr_params[0])
         cost_iters.append(
             fqu.cost_quimb(
                 quimb_unitary,
@@ -320,7 +307,7 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
         )
 
         curr_params, m, v = fqu.adam_update(curr_params, grad, m, v, t)
-        quimb_unitary = fqu.qiskit_to_quimb_unitary(rt.base_unitary, curr_params[1:], curr_params[0])
+        quimb_unitary = fqu.make_optimization_unitary(rt.n, rt.l, curr_params[1:], curr_params[0])
         cost_iters.append(
             fqu.cost_quimb(
                 quimb_unitary,
@@ -355,7 +342,7 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
 def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
     curr_params = state.prev_params_quimb.copy()
     inv = _build_inverse_circuits(cfg, rt, curr_params)
-    n_params = fqi.unitary(cfg.n, cfg.l).num_parameters
+    n_params = fcq.num_unitary_parameters(cfg.n, cfg.l)
     bounds = [(-10000, 100000)] + [(-2 * np.pi, 2 * np.pi)] * n_params
     cost_iters = []
     params_iters = [curr_params.copy()]
@@ -435,15 +422,9 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
 
     params_ref = initial_params.copy()
     params_ref[0] = 1.0
-    n_params = rt.n_params
     wires = rt.wires
-    circuits = fqi.get_circuits(params_ref[1:].tolist(), cfg.n, cfg.l)
-
-    qc1 = fqu.qisikit_to_quimb_inverse(circuits[0][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
-    qc2 = fqu.qisikit_to_quimb_inverse(circuits[1][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
-    qc3 = fqu.qisikit_to_quimb_inverse(circuits[2][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
-    qc4 = fqu.qisikit_to_quimb_inverse(circuits[3][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
-    qc5 = fqu.qisikit_to_quimb_inverse(circuits[4][0].assign_parameters(params_ref[1:]), n_params, rt.num_gates_in_u, params_ref[1:])
+    n_params = rt.n_params
+    qc1, qc2, qc3, qc4, qc5 = fqu.make_inverse_reference_circuits(params_ref[1:], cfg.n, cfg.l)
 
     grads3: list[float] = []
     start = time.perf_counter()

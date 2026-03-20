@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-import functions.functions_qiskit as fqi
+import functions.circuits_quimb as fcq
 import functions.functions_quimb as fqu
 import numpy as np
 
@@ -7,7 +7,7 @@ def plot_initialfit(Xs,MOD_init,PSI_init,initial_params,N,L,N_total,Label,FIG_DI
     fig, ax = plt.subplots()
     ax.plot(Xs,MOD_init*PSI_init,label="Initial desired state")
     u_temp =[]
-    psi_temp = fqu.qiskit_to_quimb_uni(fqi.circuit(N,L).assign_parameters(initial_params[1:]),initial_params[1:]).to_dense()
+    psi_temp = fqu.make_state_circuit(N, L, initial_params[1:]).to_dense()
     for i in range(N_total):
         u_temp.append(initial_params[0]*float(psi_temp[i][0].real))
 
@@ -31,7 +31,7 @@ def plot_final(Xs,U,params,N,L,N_total,Label,FIG_DIR):
     fig, ax = plt.subplots()
     ax.plot(Xs,U,label="Classical result")
     u_temp =[]
-    psi_temp = fqu.qiskit_to_quimb_uni(fqi.circuit(N,L).assign_parameters(params[1:]),params[1:]).to_dense()
+    psi_temp = fqu.make_state_circuit(N, L, params[1:]).to_dense()
     for i in range(N_total):
         u_temp.append(params[0]*float(psi_temp[i][0].real))
 
@@ -49,8 +49,15 @@ def plot_final(Xs,U,params,N,L,N_total,Label,FIG_DIR):
     fig.savefig(FIG_DIR / f"Final_State_{Label}.pdf", bbox_inches="tight")
     plt.close(fig)
 
-def plot_unitary(qc,FIG_DIR):
-    fig = qc.draw(output="mpl")
+def plot_unitary(N,L,FIG_DIR):
+    fig, ax = plt.subplots()
+    ax.axis("off")
+    ax.text(
+        0.02,
+        0.65,
+        f"Quimb ansatz\\nN = {N}, L = {L}\\nparameters = {fcq.num_unitary_parameters(N, L)}\\nunitary gates = {fcq.unitary_gate_count(N, L)}",
+        fontsize=12,
+    )
     fig.savefig(FIG_DIR / "circuit.pdf", bbox_inches="tight")
     plt.close(fig)
 
@@ -59,7 +66,7 @@ def plot_evolution(Xs,params,N,L,N_total,Label,FIG_DIR):
 
     for i in range(len(params)):
         u_temp =[]
-        psi_temp = fqu.qiskit_to_quimb_uni(fqi.circuit(N,L).assign_parameters(params[i][1:]),params[i][1:]).to_dense()
+        psi_temp = fqu.make_state_circuit(N, L, params[i][1:]).to_dense()
         for j in range(N_total):
             u_temp.append(params[i][0]*float(psi_temp[j][0].real))
         ax.plot(Xs, u_temp, "--")

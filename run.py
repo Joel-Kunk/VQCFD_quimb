@@ -16,7 +16,7 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
+        mode="variance",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
         compute_expr_cap=False,
     )
 
@@ -25,7 +25,8 @@ def main() -> None:
             n=3,
             l=2,
             dir_label="test",
-            label="N3_L2",
+            label="var_N3_L2",
+            variance_tries=500,
             **common,
         )
         run_simulation(cfg)
