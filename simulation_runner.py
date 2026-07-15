@@ -11,6 +11,7 @@ from scipy.optimize import minimize
 import functions.circuits_quimb as fcq
 import functions.expr_entcap as fex
 import functions.functions_quimb as fqu
+import functions.initial_states as fist
 import functions.plots as fpl
 from sim_config import SimConfig
 from sim_state import SimState
@@ -28,6 +29,7 @@ class RuntimeContext:
     n_params: int
     n: int
     l: int
+    unitary_circuit: str
 
 
 def ensure_dirs(cfg: SimConfig) -> None:
@@ -45,6 +47,10 @@ def save_manifest(cfg: SimConfig) -> Path:
             "manifest_path": str(cfg.manifest_path),
             "n_total": cfg.n_total,
             "n_timesteps": cfg.n_timesteps,
+            "resolved_unitary_circuit": cfg.resolved_unitary_circuit,
+            "resolved_initial_state": cfg.resolved_initial_state,
+            "number_of_parameters": cfg.number_of_parameters,
+            "number_of_optimization_parameters": cfg.number_of_optimization_parameters,
         }
     )
     with cfg.manifest_path.open("w", encoding="utf-8") as fh:
@@ -60,13 +66,16 @@ def setup_outputs(cfg: SimConfig) -> None:
 def compute_classical_reference(cfg: SimConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]:
     xs = np.linspace(0, 1, cfg.n_total)
     dx = xs[1] - xs[0]
-    mod_init = np.sqrt(np.sum(np.sin(2 * np.pi * xs) ** 2))
-    psi_init = np.sin(2 * np.pi * xs) / mod_init
+    initial_field = fist.make_initial_field(xs, cfg.resolved_initial_state)
+    mod_init = np.sqrt(np.sum(initial_field**2))
+    if mod_init == 0:
+        raise ValueError(f"Initial state {cfg.resolved_initial_state!r} has zero norm.")
+    psi_init = initial_field / mod_init
 
     x_plot = np.linspace(0, 1, cfg.n_total)
     t_plot = np.arange(0, cfg.t_total, cfg.dt)
     u = np.zeros((cfg.n_total, int(cfg.n_timesteps + 1)))
-    u[:, 0] = np.sin(2 * np.pi * x_plot)
+    u[:, 0] = fist.make_initial_field(x_plot, cfg.resolved_initial_state)
 
     for j in range(cfg.n_timesteps):
         for i in range(1, cfg.n_total - 1):
@@ -83,8 +92,9 @@ def build_runtime(cfg: SimConfig) -> RuntimeContext:
     if cfg.random_seed is not None:
         np.random.seed(cfg.random_seed)
 
-    fpl.plot_unitary(cfg.n, cfg.l, cfg.fig_dir)
-    n_params = fcq.num_unitary_parameters(cfg.n, cfg.l)
+    circuit_name = cfg.resolved_unitary_circuit
+    fpl.plot_unitary(cfg.n, cfg.l, cfg.fig_dir, circuit_name)
+    n_params = fcq.num_unitary_parameters(cfg.n, cfg.l, circuit_name)
     seed_params = (
         (np.random.random(n_params) * cfg.init_param_random_scale + cfg.init_param_random_center).tolist()
     )
@@ -96,6 +106,7 @@ def build_runtime(cfg: SimConfig) -> RuntimeContext:
         n_params=n_params,
         n=cfg.n,
         l=cfg.l,
+        unitary_circuit=circuit_name,
     )
 
 
@@ -106,18 +117,28 @@ def resolve_initial_params_with_fallback(
     mod_init: float,
 ) -> tuple[np.ndarray, str, float | None]:
     try:
-        return np.asarray(cfg.resolve_initial_params(), dtype=float), ("override" if cfg.initial_params is not None else "preset"), None
+        resolved = np.asarray(cfg.resolve_initial_params(), dtype=float)
+        expected = rt.n_params + 1
+        if resolved.size != expected:
+            raise ValueError(
+                f"Initial parameters for circuit {rt.unitary_circuit!r} require {expected} "
+                f"values including the norm parameter, received {resolved.size}."
+            )
+        return resolved, ("override" if cfg.initial_params is not None else "preset"), None
     except (FileNotFoundError, KeyError):
         if cfg.initial_params is not None:
             raise
 
     if cfg.verbose:
         print(
-            f"No initial-parameter preset found for (n={cfg.n}, l={cfg.l}); "
+            f"No initial-parameter preset found for (n={cfg.n}, l={cfg.l}, "
+            f"circuit={rt.unitary_circuit}, initial_state={cfg.resolved_initial_state}); "
             "running fallback initial fit optimization."
         )
 
-    qc_t = fqu.make_state_circuit(cfg.n, cfg.l, rt.seed_params)
+    qc_t = fqu.make_state_circuit(
+        cfg.n, cfg.l, rt.seed_params, rt.unitary_circuit
+    )
     initial_opt = qtn.TNOptimizer(
         qc_t,
         fqu.initial_cost_quimb,
@@ -140,11 +161,19 @@ def init_state(cfg: SimConfig, values: dict[str, float | int | str], initial_par
 
 
 def _build_inverse_circuits(cfg: SimConfig, rt: RuntimeContext, prev_params_quimb: np.ndarray) -> list:
-    return fqu.make_inverse_reference_circuits(prev_params_quimb[1:], cfg.n, cfg.l)
+    return fqu.make_inverse_reference_circuits(
+        prev_params_quimb[1:], cfg.n, cfg.l, rt.unitary_circuit
+    )
 
 
 def _make_quimb_unitary(rt: RuntimeContext, prev_params_quimb: np.ndarray):
-    return fqu.make_optimization_unitary(rt.n, rt.l, prev_params_quimb[1:], prev_params_quimb[0])
+    return fqu.make_optimization_unitary(
+        rt.n,
+        rt.l,
+        prev_params_quimb[1:],
+        prev_params_quimb[0],
+        rt.unitary_circuit,
+    )
 
 
 def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
@@ -185,6 +214,14 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
     curr_params = state.prev_params_quimb.copy()
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
     inv = _build_inverse_circuits(cfg, rt, state.prev_params_quimb)
+    unitary0 = fqu.make_optimization_unitary2(
+        rt.n,
+        rt.l,
+        state.prev_params_quimb[1:],
+        state.prev_params_quimb[0],
+        rt.unitary_circuit,
+    )
+    trees = [fqu.build_local_exp_tree(unitary0, circuit, rt.wires) for circuit in inv]
 
     t = 0
     m = np.zeros(len(state.prev_params_quimb))
@@ -215,14 +252,28 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
         t += 1
 
         grad = fqu.whole_grad_param_shift(
-            curr_params, inv[0], inv[1], inv[2], inv[3], inv[4], state.prev_params_quimb[0], rt.wires, cfg.dt, dx, cfg.mu, cfg.n, cfg.l
+            curr_params,
+            inv[0],
+            inv[1],
+            inv[2],
+            inv[3],
+            inv[4],
+            state.prev_params_quimb[0],
+            rt.wires,
+            cfg.dt,
+            dx,
+            cfg.mu,
+            cfg.n,
+            cfg.l,
+            trees,
+            rt.unitary_circuit,
         )
         grad[0] = fqu.grad_mod(
             quimb_unitary, inv[0], inv[1], inv[2], inv[3], inv[4], state.prev_params_quimb[0], rt.wires, cfg.dt, dx, cfg.mu
         )
 
         curr_params, m, v = fqu.adam_update(curr_params, grad, m, v, t)
-        quimb_unitary = fqu.make_optimization_unitary(rt.n, rt.l, curr_params[1:], curr_params[0])
+        quimb_unitary = _make_quimb_unitary(rt, curr_params)
         cost_iters.append(
             fqu.cost_quimb(
                 quimb_unitary,
@@ -301,13 +352,14 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             cfg.shots,
             cfg.n,
             cfg.l,
+            rt.unitary_circuit,
         )
         grad[0] = fqu.grad_mod_shots(
             quimb_unitary, inv[0], inv[1], inv[2], inv[3], inv[4], state.prev_params_quimb[0], rt.wires, cfg.dt, dx, cfg.mu, cfg.shots
         )
 
         curr_params, m, v = fqu.adam_update(curr_params, grad, m, v, t)
-        quimb_unitary = fqu.make_optimization_unitary(rt.n, rt.l, curr_params[1:], curr_params[0])
+        quimb_unitary = _make_quimb_unitary(rt, curr_params)
         cost_iters.append(
             fqu.cost_quimb(
                 quimb_unitary,
@@ -342,8 +394,7 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
 def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
     curr_params = state.prev_params_quimb.copy()
     inv = _build_inverse_circuits(cfg, rt, curr_params)
-    n_params = fcq.num_unitary_parameters(cfg.n, cfg.l)
-    bounds = [(-10000, 100000)] + [(-2 * np.pi, 2 * np.pi)] * n_params
+    bounds = [(-10000, 100000)] + [(-2 * np.pi, 2 * np.pi)] * rt.n_params
     cost_iters = []
     params_iters = [curr_params.copy()]
 
@@ -366,6 +417,7 @@ def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: f
             cfg.n,
             cfg.l,
             params_iters,
+            rt.unitary_circuit,
         ),
         method="COBYLA",
         bounds=bounds,
@@ -401,6 +453,10 @@ def build_values(cfg: SimConfig) -> dict[str, float | int | str]:
         "dt": cfg.dt,
         "plat_tol": cfg.plat_tol,
         "patience": cfg.patience,
+        "unitary_circuit": cfg.resolved_unitary_circuit,
+        "initial_state": cfg.resolved_initial_state,
+        "number_of_parameters": cfg.number_of_parameters,
+        "number_of_optimization_parameters": cfg.number_of_optimization_parameters,
     }
 
 
@@ -424,9 +480,17 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
     params_ref[0] = 1.0
     wires = rt.wires
     n_params = rt.n_params
-    qc1, qc2, qc3, qc4, qc5 = fqu.make_inverse_reference_circuits(params_ref[1:], cfg.n, cfg.l)
+    qc1, qc2, qc3, qc4, qc5 = fqu.make_inverse_reference_circuits(
+        params_ref[1:], cfg.n, cfg.l, rt.unitary_circuit
+    )
 
-    unitary0 = fcq.make_optimization_unitary2(cfg.n, cfg.l, params_ref[1:], params_ref[0])
+    unitary0 = fcq.make_optimization_unitary2(
+        cfg.n,
+        cfg.l,
+        params_ref[1:],
+        params_ref[0],
+        rt.unitary_circuit,
+    )
 
     trees = [
     fqu.build_local_exp_tree(unitary0, qc1, wires),
@@ -443,7 +507,21 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
         params_rand = np.random.random(n_params + 1) * 2 * np.pi
         params_rand[0] = 1.0
         grad3 = fqu.whole_grad_param_shift(
-            params_rand, qc1, qc2, qc3, qc4, qc5, params_ref[0], wires, cfg.dt, dx, cfg.mu, cfg.n, cfg.l,trees
+            params_rand,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            params_ref[0],
+            wires,
+            cfg.dt,
+            dx,
+            cfg.mu,
+            cfg.n,
+            cfg.l,
+            trees,
+            rt.unitary_circuit,
         )
         grads3.extend(np.asarray(grad3[1:], dtype=float).tolist())
         if cfg.verbose:
@@ -499,13 +577,22 @@ def run_simulation(cfg: SimConfig) -> SimState:
     state = init_state(cfg, values, initial_params)
 
     if cfg.compute_expr_cap:
-        circ = fex.unitary_pure(cfg.n, cfg.l)
+        circ = fex.unitary_pure(cfg.n, cfg.l, rt.unitary_circuit)
         exp_and_cap = fex.expr_and_ent_cap(circ, cfg.expr_entcap_samples, cfg.expr_bins)
         state.values["expressibility"] = float(exp_and_cap[0])
         state.values["entangling_capability"] = float(exp_and_cap[1])
 
     initial_fit_mse = fpl.plot_initialfit(
-        xs, mod_init, psi_init, state.prev_params_quimb, cfg.n, cfg.l, cfg.n_total, cfg.full_label, cfg.fig_dir
+        xs,
+        mod_init,
+        psi_init,
+        state.prev_params_quimb,
+        cfg.n,
+        cfg.l,
+        cfg.n_total,
+        cfg.full_label,
+        cfg.fig_dir,
+        rt.unitary_circuit,
     )
     state.values["initial_fit_mse"] = float(initial_fit_mse)
 
@@ -520,8 +607,27 @@ def run_simulation(cfg: SimConfig) -> SimState:
     state.values["shots_used_per_timestep"] = [int(x) for x in state.shots_per_timestep]
     state.values["shots_used_total"] = int(sum(state.shots_per_timestep))
 
-    fpl.plot_final(xs, u[:, -1], state.params_list_quimb[-1], cfg.n, cfg.l, cfg.n_total, cfg.full_label, cfg.fig_dir)
-    fpl.plot_evolution(xs, state.params_list_quimb, cfg.n, cfg.l, cfg.n_total, cfg.full_label, cfg.fig_dir)
+    fpl.plot_final(
+        xs,
+        u[:, -1],
+        state.params_list_quimb[-1],
+        cfg.n,
+        cfg.l,
+        cfg.n_total,
+        cfg.full_label,
+        cfg.fig_dir,
+        rt.unitary_circuit,
+    )
+    fpl.plot_evolution(
+        xs,
+        state.params_list_quimb,
+        cfg.n,
+        cfg.l,
+        cfg.n_total,
+        cfg.full_label,
+        cfg.fig_dir,
+        rt.unitary_circuit,
+    )
 
     np.save(cfg.data_dir / f"params_{cfg.full_label}.npy", np.asarray(state.params_list_quimb))
     np.save(cfg.data_dir / f"costs_{cfg.full_label}.npy", np.asarray(state.cost_list))

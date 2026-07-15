@@ -4,19 +4,42 @@ import autograd.numpy as anp
 import numpy as np
 import functions.circuits_quimb as fcq
 
-def make_state_circuit(qubits, layers, params):
-    return fcq.make_state_circuit(qubits, layers, params, parametrize=True)
+def make_state_circuit(qubits, layers, params, unitary_circuit=None):
+    return fcq.make_state_circuit(
+        qubits,
+        layers,
+        params,
+        parametrize=True,
+        unitary_circuit=unitary_circuit,
+    )
 
 
-def make_optimization_unitary(qubits, layers, params_insert, lbd0):
-    return fcq.make_optimization_unitary(qubits, layers, params_insert, lbd0)
+def make_optimization_unitary(qubits, layers, params_insert, lbd0, unitary_circuit=None):
+    return fcq.make_optimization_unitary(
+        qubits,
+        layers,
+        params_insert,
+        lbd0,
+        unitary_circuit=unitary_circuit,
+    )
 
-def make_optimization_unitary2(qubits, layers, params_insert, lbd0):
-    return fcq.make_optimization_unitary2(qubits, layers, params_insert, lbd0)
+def make_optimization_unitary2(qubits, layers, params_insert, lbd0, unitary_circuit=None):
+    return fcq.make_optimization_unitary2(
+        qubits,
+        layers,
+        params_insert,
+        lbd0,
+        unitary_circuit=unitary_circuit,
+    )
 
 
-def make_inverse_reference_circuits(prev_params, qubits, layers):
-    return fcq.make_inverse_reference_circuits(prev_params, qubits, layers)
+def make_inverse_reference_circuits(prev_params, qubits, layers, unitary_circuit=None):
+    return fcq.make_inverse_reference_circuits(
+        prev_params,
+        qubits,
+        layers,
+        unitary_circuit=unitary_circuit,
+    )
 
 def embed_circuit(qc_small,qc_big,qubits):
     qcn = qc_big.copy()
@@ -104,9 +127,33 @@ def cost_quimb_shots(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots):
     return anp.real(cost).astype(anp.float64).reshape(())
 
 
-def cost_quimb_shots2(curr_params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots,cost_vals,N,L,params_iters):
+def cost_quimb_shots2(
+    curr_params,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    shots,
+    cost_vals,
+    N,
+    L,
+    params_iters,
+    unitary_circuit=None,
+):
 
-    unitary_qu = make_optimization_unitary(N, L, curr_params[1:], lbd0=curr_params[0])
+    unitary_qu = make_optimization_unitary(
+        N,
+        L,
+        curr_params[1:],
+        lbd0=curr_params[0],
+        unitary_circuit=unitary_circuit,
+    )
 
     c1 = embed_circuit(unitary_qu,qc1,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
     c2 = embed_circuit(unitary_qu,qc2,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
@@ -162,15 +209,35 @@ def cost_quimb_shots2(curr_params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shot
 # using parameter shift rule to get gradients with shot noise. All derivatives are fine, but need to be devided by a factor of 1.414213562692549
 # except for the last one, which is correct as it is.
 
-def grad_param_shift(params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots,N,L):
+def grad_param_shift(
+    params,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    shots,
+    N,
+    L,
+    unitary_circuit=None,
+):
     grad = np.zeros(len(params))
     for i in range(1,len(params)):
         params_p = params.copy()
         params_m = params.copy()
         params_p[i] += np.pi/2
         params_m[i] -= np.pi/2
-        uni_p = make_optimization_unitary(N, L, params_p[1:], lbd0=params[0])
-        uni_m = make_optimization_unitary(N, L, params_m[1:], lbd0=params[0])
+        uni_p = make_optimization_unitary(
+            N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
+        )
+        uni_m = make_optimization_unitary(
+            N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
+        )
         cost_p = cost_quimb_shots(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots)
         cost_m = cost_quimb_shots(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots)
         grad[i] = (cost_p - cost_m)/2
@@ -179,9 +246,29 @@ def grad_param_shift(params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots,N,L)
     
     return grad
 
-def single_grad_finite_diff(params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,h,N,L):
-    uni1 = make_optimization_unitary(N, L, params[1:], params[0] + h / 2)
-    uni2 = make_optimization_unitary(N, L, params[1:], params[0] - h / 2)
+def single_grad_finite_diff(
+    params,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    h,
+    N,
+    L,
+    unitary_circuit=None,
+):
+    uni1 = make_optimization_unitary(
+        N, L, params[1:], params[0] + h / 2, unitary_circuit
+    )
+    uni2 = make_optimization_unitary(
+        N, L, params[1:], params[0] - h / 2, unitary_circuit
+    )
     diff = (cost_quimb(uni1,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu) - cost_quimb(uni2,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu))/h
     return diff
 
@@ -341,15 +428,35 @@ def cost_quimb_cached(unitary, qc1, qc2, qc3, qc4, qc5,
 
     return float(cost.real)
 
-def whole_grad_param_shift(params,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,N,L,trees):
+def whole_grad_param_shift(
+    params,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    N,
+    L,
+    trees,
+    unitary_circuit=None,
+):
     grad = np.zeros(len(params))
     for i in range(1,len(params)):
         params_p = params.copy()
         params_m = params.copy()
         params_p[i] += np.pi/2
         params_m[i] -= np.pi/2
-        uni_p = make_optimization_unitary2(N, L, params_p[1:], lbd0=params[0])
-        uni_m = make_optimization_unitary2(N, L, params_m[1:], lbd0=params[0])
+        uni_p = make_optimization_unitary2(
+            N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
+        )
+        uni_m = make_optimization_unitary2(
+            N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
+        )
         cost_p = cost_quimb_cached(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
         cost_m = cost_quimb_cached(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
         grad[i] = (cost_p - cost_m)/2

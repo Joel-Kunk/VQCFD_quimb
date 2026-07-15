@@ -7,9 +7,17 @@ import functions.circuits_quimb as fcq
 import functions.functions_quimb as fqu
 
 
-def count_total_parameters(circ: tuple[int, int]) -> int:
-    n, l = circ
-    return fcq.num_unitary_parameters(n, l)
+def _circuit_parts(circ: tuple[int, int] | tuple[int, int, str]) -> tuple[int, int, str]:
+    if len(circ) == 2:
+        n, l = circ
+        return n, l, fcq.DEFAULT_UNITARY_CIRCUIT
+    n, l, unitary_circuit = circ
+    return n, l, fcq.resolve_unitary_circuit(unitary_circuit)
+
+
+def count_total_parameters(circ: tuple[int, int] | tuple[int, int, str]) -> int:
+    n, l, unitary_circuit = _circuit_parts(circ)
+    return fcq.num_unitary_parameters(n, l, unitary_circuit)
 
 
 def select_numbers_np(N, position, value):
@@ -34,14 +42,18 @@ def special_distance(u, v, pos):
 
 
 def expressibility(circ, tries, n_bins):
-    n, l = circ
+    n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     fidelities = []
     for _ in range(tries):
         params_t1 = np.random.random(num_params) * 2 * np.pi
         params_t2 = np.random.random(num_params) * 2 * np.pi
-        uni1 = fcq.make_pure_unitary_circuit(n, l, params_t1, parametrize=False)
-        uni2 = fcq.make_pure_unitary_circuit(n, l, params_t2, parametrize=False)
+        uni1 = fcq.make_pure_unitary_circuit(
+            n, l, params_t1, parametrize=False, unitary_circuit=unitary_circuit
+        )
+        uni2 = fcq.make_pure_unitary_circuit(
+            n, l, params_t2, parametrize=False, unitary_circuit=unitary_circuit
+        )
         fidelities.append(np.abs(np.vdot(uni1.to_dense(), uni2.to_dense())) ** 2)
 
     p_pqc = np.histogram(fidelities, bins=n_bins)
@@ -59,12 +71,14 @@ def expressibility(circ, tries, n_bins):
 
 
 def entangling_capability(circ, tries):
-    n, l = circ
+    n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     ent_cap = 0
     for _ in range(tries):
         params_t = np.random.random(num_params) * 2 * np.pi
-        uni = fcq.make_pure_unitary_circuit(n, l, params_t, parametrize=False)
+        uni = fcq.make_pure_unitary_circuit(
+            n, l, params_t, parametrize=False, unitary_circuit=unitary_circuit
+        )
         vec_t = uni.to_dense()
         for j in range(n):
             ent_cap += special_distance(vec_t, vec_t, j)
@@ -74,7 +88,7 @@ def entangling_capability(circ, tries):
 
 
 def expr_and_ent_cap(circ, tries, n_bins):
-    n, l = circ
+    n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     fidelities = []
     ent_cap = 0.0
@@ -82,8 +96,12 @@ def expr_and_ent_cap(circ, tries, n_bins):
     for i in range(tries):
         params_t1 = np.random.random(num_params) * 2 * np.pi
         params_t2 = np.random.random(num_params) * 2 * np.pi
-        uni1 = fcq.make_pure_unitary_circuit(n, l, params_t1, parametrize=False)
-        uni2 = fcq.make_pure_unitary_circuit(n, l, params_t2, parametrize=False)
+        uni1 = fcq.make_pure_unitary_circuit(
+            n, l, params_t1, parametrize=False, unitary_circuit=unitary_circuit
+        )
+        uni2 = fcq.make_pure_unitary_circuit(
+            n, l, params_t2, parametrize=False, unitary_circuit=unitary_circuit
+        )
         vec_t1 = uni1.to_dense()
         vec_t2 = uni2.to_dense()
         fidelities.append(np.abs(np.vdot(vec_t1, vec_t2)) ** 2)
@@ -111,11 +129,13 @@ def expr_and_ent_cap(circ, tries, n_bins):
 
 
 def initial_fit(circ, PSI_init, MOD_init):
-    n, l = circ
+    n, l, unitary_circuit = _circuit_parts(circ)
     n_params = count_total_parameters(circ)
     params = (np.random.random(n_params) + (np.pi - 0.5)).tolist()
 
-    qc_t = fcq.make_pure_unitary_circuit(n, l, params, parametrize=True)
+    qc_t = fcq.make_pure_unitary_circuit(
+        n, l, params, parametrize=True, unitary_circuit=unitary_circuit
+    )
     initial_opt = qtn.TNOptimizer(
         qc_t,
         fqu.initial_cost_quimb,
@@ -176,20 +196,39 @@ def test_functions(N_total):
     return funcs
 
 
-def unitary_pure(qubits, layers):
-    return (qubits, layers)
+def unitary_pure(qubits, layers, unitary_circuit=None):
+    return (qubits, layers, fcq.resolve_unitary_circuit(unitary_circuit))
 
 
-def gradient_of_cost(params1, params2, mod, idx, N, L, dt, dx, mu, N_params, _num_gates_in_U):
+def gradient_of_cost(
+    params1,
+    params2,
+    mod,
+    idx,
+    N,
+    L,
+    dt,
+    dx,
+    mu,
+    N_params,
+    _num_gates_in_U,
+    unitary_circuit=None,
+):
     params1_1 = params1.copy()
     params1_1[idx] += np.pi / 2
     params1_2 = params1.copy()
     params1_2[idx] -= np.pi / 2
 
-    quimb_unitary1 = fqu.make_optimization_unitary(N, L, params1_1, mod)
-    quimb_unitary2 = fqu.make_optimization_unitary(N, L, params1_2, mod)
+    quimb_unitary1 = fqu.make_optimization_unitary(
+        N, L, params1_1, mod, unitary_circuit
+    )
+    quimb_unitary2 = fqu.make_optimization_unitary(
+        N, L, params1_2, mod, unitary_circuit
+    )
 
-    qc1, qc2, qc3, qc4, qc5 = fqu.make_inverse_reference_circuits(params2, N, L)
+    qc1, qc2, qc3, qc4, qc5 = fqu.make_inverse_reference_circuits(
+        params2, N, L, unitary_circuit
+    )
     wires = tuple(range(int(N) + 1))
 
     c1 = fqu.embed_circuit(quimb_unitary1, qc1, wires).local_expectation(qu.pauli("Z"), 0, simplify_sequence="RC")

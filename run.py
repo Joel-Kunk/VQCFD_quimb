@@ -1,12 +1,26 @@
 from simulation_runner import SimConfig, run_simulation
 
+import functions.circuits_quimb as fcq
+import functions.initial_states as fist
+
 
 def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
+    circuit_name = fcq.resolve_unitary_circuit(overrides.get("unitary_circuit"))
+    initial_state_name = fist.resolve_initial_state(overrides.get("initial_state"))
+    default_circuit = circuit_name == fcq.DEFAULT_UNITARY_CIRCUIT
+    default_initial_state = initial_state_name == fist.DEFAULT_INITIAL_STATE
+
     return SimConfig(
         n=n,
         l=l,
-        dir_label=f"N{n}",
-        label=f"L{l}",
+        dir_label=overrides.pop(
+            "dir_label",
+            f"N{n}" if default_circuit else f"N{n}_{circuit_name}",
+        ),
+        label=overrides.pop(
+            "label",
+            f"L{l}" if default_initial_state else f"L{l}_{initial_state_name}",
+        ),
         **overrides,
     )
 
@@ -18,14 +32,19 @@ def main() -> None:
     common = dict(
         mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
         compute_expr_cap=True,
+        # None preserves the old circuit, paths, and saved labels.
+        unitary_circuit=None,
+        # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
+        # "ring_trainable_crx", "multiscale_tree"
+        initial_state=None,
+        # Options: "positive_hump", "mixed_sine_modes",
+        # "tapered_gaussian", "tapered_tanh"
     )
 
     if run_mode == "single":
-        cfg = SimConfig(
+        cfg = build_sweep_cfg(
             n=6,
             l=5,
-            dir_label="N6",
-            label="L5",
             variance_tries=100,
             **common,
         )

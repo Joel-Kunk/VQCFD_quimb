@@ -14,6 +14,7 @@ import pandas as pd
 import yaml
 
 import functions.circuits_quimb as fcq
+import functions.initial_states as fist
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -23,10 +24,12 @@ RUN_TABLE_COLUMNS = [
     "Run",
     "N",
     "L",
+    "NumberOfParameters",
     "Var",
     "Expressibility",
     "EntanglingCapability",
     "Circuit",
+    "InitialState",
     "R2",
     "Fidelity",
     "MSE",
@@ -93,6 +96,8 @@ class RunData:
     @property
     def circuit(self) -> str:
         keys = (
+            "resolved_unitary_circuit",
+            "unitary_circuit",
             "circuit",
             "circuit_name",
             "circuit_type",
@@ -109,6 +114,27 @@ class RunData:
                 default="default",
             )
         )
+
+    @property
+    def initial_state(self) -> str:
+        value = _first_present(
+            (self.values, ("resolved_initial_state", "initial_state")),
+            (self.manifest, ("resolved_initial_state", "initial_state")),
+            default=fist.DEFAULT_INITIAL_STATE,
+        )
+        return fist.resolve_initial_state(value)
+
+    @property
+    def number_of_parameters(self) -> int | None:
+        value = self.metadata("number_of_parameters")
+        if value is not None:
+            return int(value)
+        if self.n is None or self.l is None:
+            return None
+        try:
+            return fcq.num_unitary_parameters(self.n, self.l, self.circuit)
+        except ValueError:
+            return None
 
     @property
     def costs(self):
@@ -197,6 +223,8 @@ def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
                     "n": run.n,
                     "l": run.l,
                     "circuit": run.circuit,
+                    "initial_state": run.initial_state,
+                    "number_of_parameters": run.number_of_parameters,
                     "shots": run.metadata("shots"),
                     "has_costs": run.files["costs"].exists(),
                     "has_params": run.files["params"].exists(),
@@ -213,7 +241,9 @@ def print_runs(runs: Sequence[Mapping[str, Any]] | None = None, limit: int = 200
         print(
             f"{row['full_label']:<18} mode={str(row['mode']):<12} "
             f"N={str(row['n']):<3} L={str(row['l']):<3} "
-            f"circuit={str(row.get('circuit')):<10} params={row.get('has_params')} "
+            f"circuit={str(row.get('circuit')):<22} "
+            f"initial_state={str(row.get('initial_state')):<18} "
+            f"n_params={str(row.get('number_of_parameters')):<4} saved={row.get('has_params')} "
             f"variance={row.get('has_variance')}"
         )
     print(f"count={len(runs)}")
@@ -469,7 +499,7 @@ def classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
     xs = np.linspace(0, 1, n_total)
     dx = xs[1] - xs[0]
     fields = np.zeros((n_total, n_timesteps + 1), dtype=float)
-    fields[:, 0] = np.sin(2 * np.pi * xs)
+    fields[:, 0] = fist.make_initial_field(xs, run.initial_state)
     for timestep in range(n_timesteps):
         previous = fields[:, timestep]
         next_field = fields[:, timestep + 1]
@@ -497,7 +527,13 @@ def quantum_field(run: RunData, timestep: int = -1) -> tuple[int, np.ndarray]:
     index = _resolve_timestep(timestep, len(params))
     state_params = np.asarray(params[index], dtype=float)
     state = np.asarray(
-        fcq.make_state_circuit(run.n, run.l, state_params[1:], parametrize=False).to_dense()
+        fcq.make_state_circuit(
+            run.n,
+            run.l,
+            state_params[1:],
+            parametrize=False,
+            unitary_circuit=run.circuit,
+        ).to_dense()
     ).reshape(-1)
     n_total = int(run.metadata("n_total", 2**run.n))
     field = state_params[0] * np.real_if_close(state[:n_total]).real
@@ -644,10 +680,12 @@ def build_run_records(
                 "Run": run.full_label,
                 "N": run.n,
                 "L": run.l,
+                "NumberOfParameters": run.number_of_parameters,
                 "Var": np.nan if variance is None else float(variance),
                 "Expressibility": _float_or_nan(run.metadata("expressibility")),
                 "EntanglingCapability": _float_or_nan(run.metadata("entangling_capability")),
                 "Circuit": circuit,
+                "InitialState": run.initial_state,
                 **metrics,
             }
         )
@@ -678,9 +716,15 @@ def filter_run_table(
     ns: Iterable[int] | int | None = None,
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
 ) -> pd.DataFrame:
     filtered = _as_table(table)
-    for column, selected in (("N", ns), ("L", ls), ("Circuit", circuits)):
+    for column, selected in (
+        ("N", ns),
+        ("L", ls),
+        ("Circuit", circuits),
+        ("InitialState", initial_states),
+    ):
         if selected is None:
             continue
         allowed = {selected} if isinstance(selected, (str, int, np.integer)) else set(selected)
@@ -695,13 +739,20 @@ def plot_run_table(
     ns: Iterable[int] | int | None = None,
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
     group_by: str | None = None,
     kind: str = "line",
     log_y: bool = False,
     ax=None,
 ):
-    """Plot any two table columns after filtering N, L, and circuit."""
-    filtered = filter_run_table(table, ns=ns, ls=ls, circuits=circuits)
+    """Plot any two table columns after filtering N, L, circuit, and initial state."""
+    filtered = filter_run_table(
+        table,
+        ns=ns,
+        ls=ls,
+        circuits=circuits,
+        initial_states=initial_states,
+    )
     for column in (x, y):
         if column not in filtered.columns:
             raise KeyError(f"Unknown column {column!r}. Available columns: {list(filtered.columns)}")
