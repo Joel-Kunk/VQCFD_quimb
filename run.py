@@ -17,15 +17,15 @@ def main() -> None:
     # Common options applied to every run.
     common = dict(
         mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
-        compute_expr_cap=False,
+        compute_expr_cap=True,
     )
 
     if run_mode == "single":
         cfg = SimConfig(
-            n=3,
-            l=3,
-            dir_label="test",
-            label="N3L3",
+            n=6,
+            l=5,
+            dir_label="N6",
+            label="L5",
             variance_tries=100,
             **common,
         )
