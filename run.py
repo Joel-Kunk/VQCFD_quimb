@@ -31,21 +31,24 @@ def main() -> None:
     # Common options applied to every run.
     common = dict(
         mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
-        compute_expr_cap=True,
+        compute_expr_cap=False,
         # None preserves the old circuit, paths, and saved labels.
-        unitary_circuit=None,
+        unitary_circuit="multiscale_tree",
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree"
         initial_state=None,
-        # Options: "positive_hump", "mixed_sine_modes",
-        # "tapered_gaussian", "tapered_tanh"
+        # Options: "positive_hump", "positive_periodic_wave",
+        # "mixed_sine_modes", "tapered_gaussian", "tapered_tanh"
     )
 
     if run_mode == "single":
         cfg = build_sweep_cfg(
-            n=6,
-            l=5,
-            variance_tries=100,
+            n=3,
+            l=3,
+            # For single runs these are used verbatim. Remove either argument
+            # to fall back to its automatic circuit/initial-state-aware label.
+            dir_label="tests",
+            label="N3_multiscale_tree_L3",
             **common,
         )
         run_simulation(cfg)

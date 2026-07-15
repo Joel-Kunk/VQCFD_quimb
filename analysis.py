@@ -500,13 +500,15 @@ def classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
     dx = xs[1] - xs[0]
     fields = np.zeros((n_total, n_timesteps + 1), dtype=float)
     fields[:, 0] = fist.make_initial_field(xs, run.initial_state)
+    # Match the simulator's modular quantum shift operators.
     for timestep in range(n_timesteps):
         previous = fields[:, timestep]
-        next_field = fields[:, timestep + 1]
-        next_field[1:-1] = (
-            previous[1:-1]
-            + (mu * dt / dx**2) * (previous[2:] - 2 * previous[1:-1] + previous[:-2])
-            - (dt / (2 * dx)) * previous[1:-1] * (previous[2:] - previous[:-2])
+        right = np.roll(previous, -1)
+        left = np.roll(previous, 1)
+        fields[:, timestep + 1] = (
+            previous
+            + (mu * dt / dx**2) * (right - 2 * previous + left)
+            - (dt / (2 * dx)) * previous * (right - left)
         )
     return xs, fields
 

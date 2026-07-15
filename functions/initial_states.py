@@ -7,6 +7,7 @@ DEFAULT_INITIAL_STATE = "sine"
 INITIAL_STATES = (
     DEFAULT_INITIAL_STATE,
     "positive_hump",
+    "positive_periodic_wave",
     "mixed_sine_modes",
     "tapered_gaussian",
     "tapered_tanh",
@@ -33,7 +34,7 @@ def resolve_initial_state(initial_state: str | None = None) -> str:
 
 
 def make_initial_field(xs: np.ndarray, initial_state: str | None = None) -> np.ndarray:
-    """Return a simple Dirichlet-compatible initial field on ``xs``."""
+    """Return one of the simple initial fields on ``xs``."""
     x = np.asarray(xs, dtype=float)
     name = resolve_initial_state(initial_state)
 
@@ -41,6 +42,8 @@ def make_initial_field(xs: np.ndarray, initial_state: str | None = None) -> np.n
         # Keep the legacy default bit-for-bit, including NumPy's tiny endpoint
         # roundoff, so ``initial_state=None`` does not alter existing runs.
         return np.sin(2 * np.pi * x)
+    if name == "positive_periodic_wave":
+        return 0.5 + 0.5 * np.sin(2 * np.pi * x)
     if name == "positive_hump":
         field = np.sin(np.pi * x)
     elif name == "mixed_sine_modes":

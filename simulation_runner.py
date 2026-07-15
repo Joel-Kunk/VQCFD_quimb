@@ -77,13 +77,16 @@ def compute_classical_reference(cfg: SimConfig) -> tuple[np.ndarray, np.ndarray,
     u = np.zeros((cfg.n_total, int(cfg.n_timesteps + 1)))
     u[:, 0] = fist.make_initial_field(x_plot, cfg.resolved_initial_state)
 
+    # Match the quantum adder: neighboring indices wrap cyclically.
     for j in range(cfg.n_timesteps):
-        for i in range(1, cfg.n_total - 1):
-            u[i, j + 1] = (
-                u[i, j]
-                + (cfg.mu * cfg.dt / (dx**2)) * (u[i + 1, j] - 2 * u[i, j] + u[i - 1, j])
-                - (cfg.dt / (2 * dx)) * u[i, j] * (u[i + 1, j] - u[i - 1, j])
-            )
+        previous = u[:, j]
+        right = np.roll(previous, -1)
+        left = np.roll(previous, 1)
+        u[:, j + 1] = (
+            previous
+            + (cfg.mu * cfg.dt / (dx**2)) * (right - 2 * previous + left)
+            - (cfg.dt / (2 * dx)) * previous * (right - left)
+        )
 
     return xs, x_plot, t_plot, u, mod_init, psi_init
 
