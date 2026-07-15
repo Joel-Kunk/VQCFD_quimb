@@ -26,12 +26,12 @@ def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
 
 
 def main() -> None:
-    run_mode = "single"  # "single" | "pairs" | "grid"
+    run_mode = "grid"  # "single" | "pairs" | "grid"
 
     # Common options applied to every run.
     common = dict(
         mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
-        compute_expr_cap=False,
+        compute_expr_cap=True,
         # None preserves the old circuit, paths, and saved labels.
         unitary_circuit="multiscale_tree",
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
@@ -43,12 +43,12 @@ def main() -> None:
 
     if run_mode == "single":
         cfg = build_sweep_cfg(
-            n=3,
-            l=3,
+            n=4,
+            l=6,
             # For single runs these are used verbatim. Remove either argument
             # to fall back to its automatic circuit/initial-state-aware label.
             dir_label="tests",
-            label="N3_multiscale_tree_L3",
+            label="N4_multiscale_tree_L6_tapered_tanh",
             **common,
         )
         run_simulation(cfg)
@@ -62,8 +62,8 @@ def main() -> None:
         ]
         todo = pairs
     elif run_mode == "grid":
-        ns = [3,4,5,6]
-        ls = [5]
+        ns = [2,3,4,5,6]
+        ls = [1,2,3,4,5,6,7,8]
         todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")

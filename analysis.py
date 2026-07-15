@@ -254,9 +254,15 @@ def list_initial_param_presets(
     show_variants: bool = True,
     n: int | None = None,
     l: int | None = None,
+    circuit: str | None = None,
+    initial_state: str | None = None,
 ) -> list[dict[str, Any]]:
     """Print and return available entries from ``initial_params_presets.yaml``."""
     presets_path = presets_path or (REPO_ROOT / "initial_params_presets.yaml")
+    if circuit is not None:
+        circuit = fcq.resolve_unitary_circuit(circuit)
+    if initial_state is not None:
+        initial_state = fist.resolve_initial_state(initial_state)
     data = _safe_yaml(presets_path)
     if not data:
         print(f"No presets found at: {presets_path}")
@@ -274,6 +280,7 @@ def list_initial_param_presets(
             entry = (data[n_key] or {})[l_key] or {}
             default_params = entry.get("default") if isinstance(entry, dict) else entry
             variants = []
+            state_presets = []
             if isinstance(entry, dict):
                 for name, variant in (entry.get("variants") or {}).items():
                     params = variant.get("params") if isinstance(variant, dict) else variant
@@ -284,6 +291,24 @@ def list_initial_param_presets(
                             "mse": variant.get("mse") if isinstance(variant, dict) else None,
                         }
                     )
+                for state_name, circuits in (entry.get("initial_states") or {}).items():
+                    if initial_state is not None and state_name != initial_state:
+                        continue
+                    for circuit_name, preset in (circuits or {}).items():
+                        if circuit is not None and circuit_name != circuit:
+                            continue
+                        params = preset.get("params") if isinstance(preset, dict) else preset
+                        state_presets.append(
+                            {
+                                "initial_state": state_name,
+                                "circuit": circuit_name,
+                                "len": len(params) if isinstance(params, list) else None,
+                                "mse": preset.get("mse") if isinstance(preset, dict) else None,
+                                "tries": preset.get("tries") if isinstance(preset, dict) else None,
+                            }
+                        )
+            if (circuit is not None or initial_state is not None) and not state_presets:
+                continue
             rows.append(
                 {
                     "n": n_int,
@@ -291,6 +316,7 @@ def list_initial_param_presets(
                     "default_len": len(default_params) if isinstance(default_params, list) else None,
                     "default_mse": entry.get("default_mse") if isinstance(entry, dict) else None,
                     "variants": variants,
+                    "state_presets": state_presets,
                 }
             )
 
@@ -306,6 +332,11 @@ def list_initial_param_presets(
         if show_variants:
             for variant in row["variants"]:
                 print(f"    variant={variant['name']} | len={variant['len']} | mse={variant['mse']}")
+            for preset in row["state_presets"]:
+                print(
+                    f"    initial_state={preset['initial_state']} | circuit={preset['circuit']} "
+                    f"| len={preset['len']} | mse={preset['mse']} | tries={preset['tries']}"
+                )
     print(f"count={len(rows)} presets")
     return rows
 

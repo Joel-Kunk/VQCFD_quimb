@@ -103,23 +103,6 @@ class SimConfig:
         if self.initial_params is not None:
             return tuple(float(x) for x in self.initial_params)
 
-        if self.resolved_initial_state != fist.DEFAULT_INITIAL_STATE:
-            raise KeyError(
-                f"Stored presets target the default sine initial state, not {self.resolved_initial_state!r}."
-            )
-
-        variant_name = self.initial_params_variant
-        if variant_name is None:
-            if self.resolved_unitary_circuit == fcq.DEFAULT_UNITARY_CIRCUIT:
-                variant_name = None
-            elif self.resolved_unitary_circuit == "uni2":
-                variant_name = "uni2"
-            else:
-                raise KeyError(
-                    f"No stored initial-parameter family is configured for circuit "
-                    f"{self.resolved_unitary_circuit!r}."
-                )
-
         presets_path = self.initial_params_presets_path
         if not presets_path.exists():
             raise FileNotFoundError(
@@ -146,6 +129,42 @@ class SimConfig:
             raise KeyError(
                 f"No initial parameter preset found for (n={self.n}, l={self.l}) in {presets_path}."
             )
+
+        circuit_name = self.resolved_unitary_circuit
+        initial_state_name = self.resolved_initial_state
+        if isinstance(entry, dict):
+            state_entry = (entry.get("initial_states") or {}).get(initial_state_name, {})
+            circuit_entry = state_entry.get(circuit_name)
+            if circuit_entry is not None:
+                params = (
+                    circuit_entry.get("params")
+                    if isinstance(circuit_entry, dict)
+                    else circuit_entry
+                )
+                if params is None:
+                    raise KeyError(
+                        f"Preset for (n={self.n}, l={self.l}, circuit={circuit_name!r}, "
+                        f"initial_state={initial_state_name!r}) has no params in {presets_path}."
+                    )
+                return tuple(float(x) for x in params)
+
+        # Backward-compatible lookup for the original sine/default and sine/UNI2 schema.
+        if initial_state_name != fist.DEFAULT_INITIAL_STATE:
+            raise KeyError(
+                f"No initial parameter preset found for (n={self.n}, l={self.l}, "
+                f"circuit={circuit_name!r}, initial_state={initial_state_name!r}) in {presets_path}."
+            )
+
+        variant_name = self.initial_params_variant
+        if variant_name is None:
+            if circuit_name == fcq.DEFAULT_UNITARY_CIRCUIT:
+                variant_name = None
+            elif circuit_name == "uni2":
+                variant_name = "uni2"
+            else:
+                raise KeyError(
+                    f"No stored initial-parameter family is configured for circuit {circuit_name!r}."
+                )
 
         if isinstance(entry, dict):
             if variant_name is not None:
