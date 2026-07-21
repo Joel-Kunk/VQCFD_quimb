@@ -10,13 +10,13 @@ def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
     default_circuit = circuit_name == fcq.DEFAULT_UNITARY_CIRCUIT
     default_initial_state = initial_state_name == fist.DEFAULT_INITIAL_STATE
 
-    if overrides.get("mode", "noise_free") == "variance":
+    if overrides.get("mode", "noise_free") == "gradient":
         label_parts = [f"N{n}L{l}"]
         if not default_circuit:
             label_parts.append(circuit_name)
         if not default_initial_state:
             label_parts.append(initial_state_name)
-        automatic_dir_label = "var"
+        automatic_dir_label = "grad"
         automatic_label = "_".join(label_parts)
     else:
         automatic_dir_label = f"N{n}" if default_circuit else f"N{n}_{circuit_name}"
@@ -36,7 +36,8 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "variance"
+        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
+        # `exp_only` always computes both metrics; this flag is for full runs.
         compute_expr_cap=False,
         # None selects the default circuit and omits the circuit label suffix.
         unitary_circuit="multiscale_tree",

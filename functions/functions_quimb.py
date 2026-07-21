@@ -400,47 +400,109 @@ def build_local_exp_tree(unitary, qc, wires):
     )
     return info["tree"]
 
+def local_expectations_cached(unitary, qc1, qc2, qc3, qc4, qc5, wires, trees):
+    """Evaluate the five local expectations used by the VQCFD cost."""
+    circuits = (qc1, qc2, qc3, qc4, qc5)
+    return np.asarray(
+        [
+            embed_circuit(unitary, qc, wires).local_expectation(
+                qu.pauli("Z"),
+                0,
+                simplify_sequence="",
+                optimize=tree,
+            )
+            for qc, tree in zip(circuits, trees)
+        ]
+    )
+
+
+def cost_from_local_expectations(expectations, lbd0_t, lbd0, dt, dx, mu):
+    """Combine cached circuit expectations into the cost for one time step."""
+    c1, c2, c3, c4, c5 = expectations
+    lbd0_t_conj = np.conjugate(lbd0_t)
+    cost = (
+        abs(lbd0) ** 2
+        - 2
+        * np.real(
+            lbd0_t_conj
+            * lbd0
+            * (
+                c1
+                + (dt * mu / dx**2) * (c2 - 2 * c1 + c3)
+                - (dt * lbd0_t_conj / (2 * dx)) * (c4 - c5)
+            )
+        )
+        + abs(lbd0_t) ** 2
+    )
+    return float(np.real(cost))
+
+
 def cost_quimb_cached(unitary, qc1, qc2, qc3, qc4, qc5,
                       lbd0_t,lbd0, wires, dt, dx, mu, trees):
-
-    c1 = embed_circuit(unitary, qc1, wires).local_expectation(
-        qu.pauli('Z'), 0,
-        simplify_sequence="",
-        optimize=trees[0],
+    expectations = local_expectations_cached(
+        unitary, qc1, qc2, qc3, qc4, qc5, wires, trees
     )
-    c2 = embed_circuit(unitary, qc2, wires).local_expectation(
-        qu.pauli('Z'), 0,
-        simplify_sequence="",
-        optimize=trees[1],
-    )
-    c3 = embed_circuit(unitary, qc3, wires).local_expectation(
-        qu.pauli('Z'), 0,
-        simplify_sequence="",
-        optimize=trees[2],
-    )
-    c4 = embed_circuit(unitary, qc4, wires).local_expectation(
-        qu.pauli('Z'), 0,
-        simplify_sequence="",
-        optimize=trees[3],
-    )
-    c5 = embed_circuit(unitary, qc5, wires).local_expectation(
-        qu.pauli('Z'), 0,
-        simplify_sequence="",
-        optimize=trees[4],
-    )
+    return cost_from_local_expectations(expectations, lbd0_t, lbd0, dt, dx, mu)
 
 
-    cost = (
-        abs(lbd0)**2
-        - 2 * (lbd0_t.conjugate() * lbd0 * (
-            c1
-            + (dt * mu / dx**2) * (c2 - 2*c1 + c3)
-            - (dt * lbd0_t.conjugate() / (2*dx)) * (c4 - c5)
-        )).real
-        + abs(lbd0_t)**2
-    )
+def whole_grads_param_shift(
+    params,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dts,
+    dx,
+    mu,
+    N,
+    L,
+    trees,
+    unitary_circuit=None,
+):
+    """Return gradients for several ``dt`` values using one pair of evaluations.
 
-    return float(cost.real)
+    The five expectation values are independent of ``dt``. Their shifted
+    derivatives are therefore evaluated once per parameter, then combined with
+    each requested set of PDE coefficients. The result has shape
+    ``(len(dts), len(params))`` and includes the unused norm slot at index zero.
+    """
+    dts = np.atleast_1d(np.asarray(dts, dtype=float))
+    grads = np.zeros((dts.size, len(params)), dtype=float)
+    lbd0_t_conj = np.conjugate(lbd0_t)
+
+    for i in range(1, len(params)):
+        params_p = params.copy()
+        params_m = params.copy()
+        params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
+        params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
+        uni_p = make_optimization_unitary2(
+            N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
+        )
+        uni_m = make_optimization_unitary2(
+            N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
+        )
+        exp_p = local_expectations_cached(
+            uni_p, qc1, qc2, qc3, qc4, qc5, wires, trees
+        )
+        exp_m = local_expectations_cached(
+            uni_m, qc1, qc2, qc3, qc4, qc5, wires, trees
+        )
+        dc1, dc2, dc3, dc4, dc5 = hadamard_test_parameter_shift(exp_p, exp_m)
+
+        for dt_index, dt in enumerate(dts):
+            bracket_derivative = (
+                dc1
+                + (dt * mu / dx**2) * (dc2 - 2 * dc1 + dc3)
+                - (dt * lbd0_t_conj / (2 * dx)) * (dc4 - dc5)
+            )
+            grads[dt_index, i] = float(
+                -2 * np.real(lbd0_t_conj * params[0] * bracket_derivative)
+            )
+
+    return grads
 
 def whole_grad_param_shift(
     params,
@@ -459,23 +521,23 @@ def whole_grad_param_shift(
     trees,
     unitary_circuit=None,
 ):
-    grad = np.zeros(len(params))
-    for i in range(1,len(params)):
-        params_p = params.copy()
-        params_m = params.copy()
-        params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
-        params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
-        uni_p = make_optimization_unitary2(
-            N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
-        )
-        uni_m = make_optimization_unitary2(
-            N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
-        )
-        cost_p = cost_quimb_cached(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
-        cost_m = cost_quimb_cached(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
-        grad[i] = hadamard_test_parameter_shift(cost_p, cost_m)
-    
-    return grad
+    return whole_grads_param_shift(
+        params,
+        qc1,
+        qc2,
+        qc3,
+        qc4,
+        qc5,
+        lbd0_t,
+        wires,
+        [dt],
+        dx,
+        mu,
+        N,
+        L,
+        trees,
+        unitary_circuit,
+    )[0]
 
 
 def grad_mod(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu):

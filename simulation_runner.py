@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Callable
 import time
 
@@ -37,14 +38,15 @@ def ensure_dirs(cfg: SimConfig) -> None:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
 
 
-def save_manifest(cfg: SimConfig) -> Path:
+def save_manifest(cfg: SimConfig, manifest_path: Path | None = None) -> Path:
+    manifest_path = cfg.manifest_path if manifest_path is None else manifest_path
     manifest = asdict(cfg)
     manifest.update(
         {
             "results_dir": str(cfg.results_dir),
             "fig_dir": str(cfg.fig_dir),
             "data_dir": str(cfg.data_dir),
-            "manifest_path": str(cfg.manifest_path),
+            "manifest_path": str(manifest_path),
             "n_total": cfg.n_total,
             "n_timesteps": cfg.n_timesteps,
             "resolved_unitary_circuit": cfg.resolved_unitary_circuit,
@@ -53,9 +55,16 @@ def save_manifest(cfg: SimConfig) -> Path:
             "number_of_optimization_parameters": cfg.number_of_optimization_parameters,
         }
     )
-    with cfg.manifest_path.open("w", encoding="utf-8") as fh:
+    if cfg.mode == "gradient":
+        manifest.update(
+            {
+                "gradient_sweeps": cfg.gradient_sweeps,
+                "gradient_num_samples": cfg.gradient_num_samples,
+            }
+        )
+    with manifest_path.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(manifest, fh, sort_keys=True)
-    return cfg.manifest_path
+    return manifest_path
 
 
 def setup_outputs(cfg: SimConfig) -> None:
@@ -463,17 +472,27 @@ def build_values(cfg: SimConfig) -> dict[str, float | int | str]:
     }
 
 
-def _variance_progress_interval(total_tries: int, max_lines: int = 50) -> int:
+def _gradient_progress_interval(total_sweeps: int, max_lines: int = 50) -> int:
     """Return a print interval that emits at most ``max_lines`` progress lines."""
     if max_lines < 1:
         raise ValueError("max_lines must be at least 1.")
-    return max(1, (int(total_tries) + max_lines - 1) // max_lines)
+    return max(1, (int(total_sweeps) + max_lines - 1) // max_lines)
 
 
-def run_variance_analysis(cfg: SimConfig) -> SimState:
+def run_gradient_analysis(cfg: SimConfig) -> SimState:
+    if cfg.mu <= 0:
+        raise ValueError("gradient mode requires positive mu to set a diffusion number.")
+    if cfg.gradient_sweeps < 1:
+        raise ValueError(
+            f"gradient_tries={cfg.gradient_tries} is smaller than the circuit's "
+            f"{cfg.number_of_parameters} parameters, so it cannot form one complete sweep."
+        )
+
     setup_outputs(cfg)
     xs, _x_plot, _t_plot, _u, mod_init, psi_init = compute_classical_reference(cfg)
     dx = xs[1] - xs[0]
+    fixed_diffusion_dt = cfg.gradient_diffusion_number * dx**2 / cfg.mu
+    current_diffusion_number = cfg.mu * cfg.dt / dx**2
 
     rt = build_runtime(cfg)
     values = build_values(cfg)
@@ -503,21 +522,22 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
     )
 
     trees = [
-    fqu.build_local_exp_tree(unitary0, qc1, wires),
-    fqu.build_local_exp_tree(unitary0, qc2, wires),
-    fqu.build_local_exp_tree(unitary0, qc3, wires),
-    fqu.build_local_exp_tree(unitary0, qc4, wires),
-    fqu.build_local_exp_tree(unitary0, qc5, wires),
-]
+        fqu.build_local_exp_tree(unitary0, qc1, wires),
+        fqu.build_local_exp_tree(unitary0, qc2, wires),
+        fqu.build_local_exp_tree(unitary0, qc3, wires),
+        fqu.build_local_exp_tree(unitary0, qc4, wires),
+        fqu.build_local_exp_tree(unitary0, qc5, wires),
+    ]
 
-    grads3: list[float] = []
+    gradients_current = np.empty((n_params, cfg.gradient_sweeps), dtype=float)
+    gradients_fixed_diffusion = np.empty_like(gradients_current)
     start = time.perf_counter()
-    progress_interval = _variance_progress_interval(cfg.variance_tries)
+    progress_interval = _gradient_progress_interval(cfg.gradient_sweeps)
 
-    for i in range(cfg.variance_tries):
+    for i in range(cfg.gradient_sweeps):
         params_rand = np.random.random(n_params + 1) * 2 * np.pi
         params_rand[0] = 1.0
-        grad3 = fqu.whole_grad_param_shift(
+        paired_gradients = fqu.whole_grads_param_shift(
             params_rand,
             qc1,
             qc2,
@@ -526,7 +546,7 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
             qc5,
             params_ref[0],
             wires,
-            cfg.dt,
+            [cfg.dt, fixed_diffusion_dt],
             dx,
             cfg.mu,
             cfg.n,
@@ -534,27 +554,43 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
             trees,
             rt.unitary_circuit,
         )
-        grads3.extend(np.asarray(grad3[1:], dtype=float).tolist())
-        completed_tries = i + 1
+        gradients_current[:, i] = paired_gradients[0, 1:]
+        gradients_fixed_diffusion[:, i] = paired_gradients[1, 1:]
+        completed_sweeps = i + 1
         if cfg.verbose and (
-            completed_tries % progress_interval == 0
-            or completed_tries == cfg.variance_tries
+            completed_sweeps % progress_interval == 0
+            or completed_sweeps == cfg.gradient_sweeps
         ):
-            print(f"variance try = {completed_tries}/{cfg.variance_tries}")
+            completed_gradients = completed_sweeps * n_params
+            print(
+                f"gradient sweep = {completed_sweeps}/{cfg.gradient_sweeps} "
+                f"({completed_gradients}/{cfg.gradient_num_samples} scalar gradients)"
+            )
     elapsed = time.perf_counter() - start
 
-    variance = float(np.var(grads3)) if grads3 else 0.0
-    state.values["variance"] = variance
-    state.values["variance_tries"] = int(cfg.variance_tries)
-    state.values["variance_num_samples"] = int(len(grads3))
-    state.values["variance_runtime_s"] = float(elapsed)
+    state.values["gradient_tries"] = int(cfg.gradient_tries)
+    state.values["gradient_sweeps"] = int(cfg.gradient_sweeps)
+    state.values["gradient_num_samples"] = int(cfg.gradient_num_samples)
+    state.values["gradient_runtime_s"] = float(elapsed)
+    state.values["gradient_diffusion_number_current"] = float(current_diffusion_number)
+    state.values["gradient_diffusion_number_fixed"] = float(cfg.gradient_diffusion_number)
+    state.values["gradient_dt_current"] = float(cfg.dt)
+    state.values["gradient_dt_fixed_diffusion"] = float(fixed_diffusion_dt)
+    state.values["gradient_shape"] = [int(n_params), int(cfg.gradient_sweeps)]
+    state.values["gradient_parameter_labels"] = [f"theta_{i}" for i in range(n_params)]
     state.times.append(elapsed)
     state.shots_per_timestep.append(0)
     state.values["shots_used_per_timestep"] = [0]
     state.values["shots_used_total"] = 0
 
-    np.save(cfg.data_dir / f"variance_{cfg.full_label}.npy", np.asarray(variance))
-    np.save(cfg.data_dir / f"variance_grads_{cfg.full_label}.npy", np.asarray(grads3, dtype=float))
+    np.save(
+        cfg.data_dir / f"gradients_current_{cfg.full_label}.npy",
+        gradients_current,
+    )
+    np.save(
+        cfg.data_dir / f"gradients_fixed_diffusion_{cfg.full_label}.npy",
+        gradients_fixed_diffusion,
+    )
     with (cfg.data_dir / f"values_{cfg.full_label}.yaml").open("w", encoding="utf-8") as fh:
         yaml.safe_dump(state.values, fh, sort_keys=False)
 
@@ -565,15 +601,60 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
     return state
 
 
+def run_exp_only(cfg: SimConfig) -> SimState:
+    """Calculate ansatz expressibility metrics without running time evolution."""
+    ensure_dirs(cfg)
+    save_manifest(cfg, cfg.expr_manifest_path)
+    if cfg.random_seed is not None:
+        np.random.seed(cfg.random_seed)
+
+    values = build_values(cfg)
+    start = time.perf_counter()
+    circuit = fex.unitary_pure(cfg.n, cfg.l, cfg.resolved_unitary_circuit)
+    expressibility, entangling_capability = fex.expr_and_ent_cap(
+        circuit,
+        cfg.expr_entcap_samples,
+        cfg.expr_bins,
+    )
+    elapsed = time.perf_counter() - start
+    values.update(
+        {
+            "mode": "exp_only",
+            "expressibility": float(expressibility),
+            "entangling_capability": float(entangling_capability),
+            "expr_entcap_samples": int(cfg.expr_entcap_samples),
+            "expr_bins": int(cfg.expr_bins),
+            "expr_runtime_s": float(elapsed),
+            "shots_used_total": 0,
+        }
+    )
+    state = SimState(prev_params_quimb=np.empty(0, dtype=float), values=values)
+
+    with cfg.expr_values_path.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(state.values, fh, sort_keys=False)
+
+    if cfg.verbose:
+        print(f"expressibility = {state.values['expressibility']}")
+        print(f"entangling capability = {state.values['entangling_capability']}")
+        print(f"expr runtime = {elapsed:.3f} s")
+
+    return state
+
+
 def run_simulation(cfg: SimConfig) -> SimState:
     if cfg.verbose:
         print(cfg.dir_label)
         print(cfg.label)
         
-    if cfg.mode == "variance":
-        return run_variance_analysis(cfg)
+    if cfg.mode == "gradient":
+        return run_gradient_analysis(cfg)
+    if cfg.mode == "exp_only":
+        return run_exp_only(cfg)
     if cfg.mode not in STEPPERS:
-        raise ValueError(f"Unknown mode '{cfg.mode}'. Expected one of: {', '.join([*STEPPERS, 'variance'])}")
+        raise ValueError(
+            f"Unknown mode '{cfg.mode}'. Expected one of: "
+            f"{', '.join([*STEPPERS, 'gradient', 'exp_only'])}"
+        )
 
     setup_outputs(cfg)
     xs, _x_plot, _t_plot, u, mod_init, psi_init = compute_classical_reference(cfg)

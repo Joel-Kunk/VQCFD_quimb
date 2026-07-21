@@ -10,15 +10,28 @@ import functions.circuits_quimb as fcq
 import functions.initial_states as fist
 
 
-def default_variance_tries(n: int, l: int) -> int:
-    return 500 if n >= 5 and l == 8 else 1000
+def default_gradient_tries(n: int) -> int:
+    """Return the requested number of scalar gradients for a gradient run."""
+    if 2 <= n <= 5:
+        return 20_000
+    defaults = {
+        6: 15_000,
+        7: 10_000,
+        8: 5_000,
+        9: 4_000,
+        10: 500,
+    }
+    try:
+        return defaults[n]
+    except KeyError as exc:
+        raise ValueError("Gradient-run defaults are defined for N=2 through N=10.") from exc
 
 
 @dataclass(slots=True)
 class SimConfig:
     label: str = "L3"
     dir_label: str = "N3"
-    mode: str = "noise_free"  # noise_free | adam_exact | adam_shots | cobyla_shots | variance
+    mode: str = "noise_free"  # noise_free | adam_exact | adam_shots | cobyla_shots | gradient | exp_only
     unitary_circuit: str | None = None
     initial_state: str | None = None
 
@@ -45,7 +58,10 @@ class SimConfig:
     expr_entcap_samples: int = 100000
     expr_bins: int = 100
 
-    variance_tries: int | None = None
+    # Requested number of scalar parameter gradients. Gradient mode rounds this
+    # down to the nearest complete random-parameter sweep.
+    gradient_tries: int | None = None
+    gradient_diffusion_number: float = 0.1
     
     initial_params: tuple[float, ...] | None = None
     initial_params_presets_file: str = "initial_params_presets.yaml"
@@ -55,8 +71,12 @@ class SimConfig:
     random_seed: int | None = None
 
     def __post_init__(self) -> None:
-        if self.variance_tries is None:
-            self.variance_tries = default_variance_tries(self.n, self.l)
+        if self.gradient_tries is None and self.mode == "gradient":
+            self.gradient_tries = default_gradient_tries(self.n)
+        if self.gradient_tries is not None and self.gradient_tries < 1:
+            raise ValueError("gradient_tries must be at least 1.")
+        if self.mode == "gradient" and self.gradient_diffusion_number <= 0:
+            raise ValueError("gradient_diffusion_number must be positive.")
 
     @property
     def results_dir(self) -> Path:
@@ -73,6 +93,14 @@ class SimConfig:
     @property
     def manifest_path(self) -> Path:
         return self.results_dir / f"manifest_{self.full_label}.yaml"
+
+    @property
+    def expr_manifest_path(self) -> Path:
+        return self.results_dir / f"manifest_{self.full_label}_expr.yaml"
+
+    @property
+    def expr_values_path(self) -> Path:
+        return self.data_dir / f"values_{self.full_label}_expr.yaml"
 
     @property
     def full_label(self) -> str:
@@ -102,6 +130,18 @@ class SimConfig:
     @property
     def number_of_optimization_parameters(self) -> int:
         return self.number_of_parameters + 1
+
+    @property
+    def gradient_sweeps(self) -> int:
+        """Number of complete parameter sweeps in a gradient run."""
+        if self.gradient_tries is None:
+            raise ValueError("gradient_tries is only populated for gradient runs.")
+        return int(self.gradient_tries) // self.number_of_parameters
+
+    @property
+    def gradient_num_samples(self) -> int:
+        """Actual scalar-gradient count after rounding to complete sweeps."""
+        return self.gradient_sweeps * self.number_of_parameters
 
     @property
     def initial_params_presets_path(self) -> Path:

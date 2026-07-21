@@ -156,6 +156,14 @@ class RunData:
         value = self.metadata("variance")
         return None if value is None else float(value)
 
+    @property
+    def gradients_current(self):
+        return self.load_array("gradients_current")
+
+    @property
+    def gradients_fixed_diffusion(self):
+        return self.load_array("gradients_fixed_diffusion")
+
 
 def _run_paths(dir_label: str, label: str, results_root: Path = RESULTS_ROOT):
     results_dir = Path(results_root) / f"results_{dir_label}"
@@ -179,6 +187,8 @@ def load_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> R
         "times": data_dir / f"times_{full_label}.npy",
         "variance": data_dir / f"variance_{full_label}.npy",
         "variance_grads": data_dir / f"variance_grads_{full_label}.npy",
+        "gradients_current": data_dir / f"gradients_current_{full_label}.npy",
+        "gradients_fixed_diffusion": data_dir / f"gradients_fixed_diffusion_{full_label}.npy",
         "num_evals": data_dir / f"num_evals_{full_label}.npy",
     }
     return RunData(
@@ -198,12 +208,102 @@ def load_runs(selection: Iterable[tuple[str, str]], results_root: Path = RESULTS
     return [load_run(dir_label, label, results_root) for dir_label, label in selection]
 
 
+def load_expr_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> RunData:
+    """Load an ``exp_only`` result stored alongside an ordinary run."""
+    results_dir, data_dir, fig_dir, base_full_label = _run_paths(
+        dir_label, label, results_root
+    )
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+    full_label = f"{base_full_label}_expr"
+    manifest_path = results_dir / f"manifest_{full_label}.yaml"
+    values_path = data_dir / f"values_{full_label}.yaml"
+    if not manifest_path.exists() and not values_path.exists():
+        raise FileNotFoundError(
+            f"No expression-only result found for {base_full_label}: "
+            f"expected {manifest_path} or {values_path}."
+        )
+    files = {
+        "manifest": manifest_path,
+        "values_yaml": values_path,
+        "params": data_dir / f"params_{full_label}.npy",
+        "costs": data_dir / f"costs_{full_label}.npy",
+        "times": data_dir / f"times_{full_label}.npy",
+        "variance": data_dir / f"variance_{full_label}.npy",
+        "variance_grads": data_dir / f"variance_grads_{full_label}.npy",
+        "gradients_current": data_dir / f"gradients_current_{full_label}.npy",
+        "gradients_fixed_diffusion": data_dir / f"gradients_fixed_diffusion_{full_label}.npy",
+        "num_evals": data_dir / f"num_evals_{full_label}.npy",
+    }
+    return RunData(
+        dir_label=dir_label,
+        label=label,
+        full_label=full_label,
+        results_dir=results_dir,
+        data_dir=data_dir,
+        fig_dir=fig_dir,
+        manifest=_safe_yaml(manifest_path),
+        values=_safe_yaml(values_path),
+        files=files,
+    )
+
+
+def load_expr_runs(
+    selection: Iterable[tuple[str, str]],
+    results_root: Path = RESULTS_ROOT,
+) -> list[RunData]:
+    return [load_expr_run(dir_label, label, results_root) for dir_label, label in selection]
+
+
+def discover_expr_runs(
+    results_root: Path = RESULTS_ROOT,
+    include_full_runs: bool = True,
+) -> list[RunData]:
+    """Discover expression-only results and, optionally, metrics in full runs.
+
+    When both variants exist for the same run folder, the independently saved
+    ``*_expr`` result is preferred over the metrics embedded in a full run.
+    """
+    results_root = Path(results_root)
+    runs = []
+    expression_keys: set[tuple[str, str]] = set()
+    for results_dir in sorted(results_root.glob("results_*")):
+        dir_label = results_dir.name.removeprefix("results_")
+        for data_dir in sorted(results_dir.glob("data_*")):
+            label = data_dir.name.removeprefix("data_")
+            base_full_label = f"{dir_label}_{label}"
+            if (data_dir / f"values_{base_full_label}_expr.yaml").exists():
+                runs.append(load_expr_run(dir_label, label, results_root))
+                expression_keys.add((dir_label, label))
+
+    if include_full_runs:
+        for row in list_runs(results_root):
+            key = (row["dir_label"], row["label"])
+            if key in expression_keys:
+                continue
+            run = load_run(*key, results_root)
+            if (
+                run.metadata("expressibility") is not None
+                or run.metadata("entangling_capability") is not None
+            ):
+                runs.append(run)
+
+    runs.sort(
+        key=lambda run: (
+            run.n if run.n is not None else 10**9,
+            run.l if run.l is not None else 10**9,
+            run.full_label,
+        )
+    )
+    return runs
+
+
 def discover_simulation_runs(results_root: Path = RESULTS_ROOT) -> list[RunData]:
-    """Load every non-variance run that has a saved parameter trajectory."""
+    """Load every time-evolution run that has a saved parameter trajectory."""
     return [
         load_run(row["dir_label"], row["label"], results_root)
         for row in list_runs(results_root)
-        if row["mode"] != "variance" and row["has_params"]
+        if row["mode"] not in {"variance", "gradient"} and row["has_params"]
     ]
 
 
@@ -214,6 +314,20 @@ def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
         for data_dir in sorted(results_dir.glob("data_*")):
             label = data_dir.name.removeprefix("data_")
             run = load_run(dir_label, label, results_root)
+            if not any(
+                run.files[key].exists()
+                for key in (
+                    "manifest",
+                    "values_yaml",
+                    "params",
+                    "variance",
+                    "gradients_current",
+                    "gradients_fixed_diffusion",
+                )
+            ):
+                # The directory can contain only an independently named
+                # expression result, which is handled by discover_expr_runs().
+                continue
             rows.append(
                 {
                     "dir_label": dir_label,
@@ -229,6 +343,10 @@ def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
                     "has_costs": run.files["costs"].exists(),
                     "has_params": run.files["params"].exists(),
                     "has_variance": run.files["variance"].exists() or run.variance is not None,
+                    "has_gradients": (
+                        run.files["gradients_current"].exists()
+                        or run.files["gradients_fixed_diffusion"].exists()
+                    ),
                     "path": str(data_dir),
                 }
             )
@@ -815,6 +933,216 @@ def plot_run_table(
     if group_by is not None:
         ax.legend()
     return filtered, ax
+
+
+def load_gradient_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:
+    """Load the metadata and array paths for one gradient-mode run."""
+    run = load_run(dir_label, label, results_root)
+    return {
+        "dir_label": dir_label,
+        "label": label,
+        "full_label": run.full_label,
+        "data_dir": run.data_dir,
+        "values": run.values,
+        "manifest": run.manifest,
+        "n": run.n,
+        "l": run.l,
+        "mode": run.mode,
+        "circuit": run.circuit,
+        "initial_state": run.initial_state,
+        "number_of_parameters": run.number_of_parameters,
+        "gradient_tries": run.metadata("gradient_tries"),
+        "gradient_sweeps": run.metadata("gradient_sweeps"),
+        "gradient_num_samples": run.metadata("gradient_num_samples"),
+        "gradient_runtime_s": run.metadata("gradient_runtime_s"),
+        "gradient_diffusion_number_current": run.metadata("gradient_diffusion_number_current"),
+        "gradient_diffusion_number_fixed": run.metadata("gradient_diffusion_number_fixed"),
+        "gradient_dt_current": run.metadata("gradient_dt_current", run.metadata("dt")),
+        "gradient_dt_fixed_diffusion": run.metadata("gradient_dt_fixed_diffusion"),
+        "gradient_parameter_labels": run.metadata("gradient_parameter_labels"),
+        "gradients_current_path": run.files["gradients_current"],
+        "gradients_fixed_diffusion_path": run.files["gradients_fixed_diffusion"],
+    }
+
+
+def _parameter_gradient_matrix(path: Path, number_of_parameters: int) -> np.ndarray:
+    """Load a gradient array and orient it as parameter x sweep."""
+    gradients = np.asarray(np.load(path), dtype=float)
+    if gradients.ndim == 1:
+        if gradients.size % number_of_parameters:
+            raise ValueError(
+                f"Gradient array {path} has {gradients.size} entries, which is not "
+                f"divisible by {number_of_parameters} parameters."
+            )
+        return gradients.reshape(-1, number_of_parameters).T
+    if gradients.ndim != 2:
+        raise ValueError(f"Gradient array {path} must be one- or two-dimensional.")
+    if gradients.shape[0] == number_of_parameters:
+        return gradients
+    if gradients.shape[1] == number_of_parameters:
+        return gradients.T
+    raise ValueError(
+        f"Neither dimension of gradient array {path} matches the expected "
+        f"{number_of_parameters} parameters: shape={gradients.shape}."
+    )
+
+
+def load_gradient_matrices(
+    item: RunData | Mapping[str, Any],
+) -> dict[str, np.ndarray]:
+    """Return available gradient matrices keyed by coefficient variant."""
+    if isinstance(item, RunData):
+        row = load_gradient_run(item.dir_label, item.label, item.results_dir.parent)
+    else:
+        row = item
+    number_of_parameters = row.get("number_of_parameters")
+    if number_of_parameters is None:
+        raise ValueError(f"Run {row.get('full_label', '<unknown>')} has no parameter count.")
+
+    matrices = {}
+    for dataset, key in (
+        ("current_dt", "gradients_current_path"),
+        ("fixed_diffusion", "gradients_fixed_diffusion_path"),
+    ):
+        path_value = row.get(key)
+        if path_value is None:
+            continue
+        path = Path(path_value)
+        if path.exists():
+            matrices[dataset] = _parameter_gradient_matrix(path, int(number_of_parameters))
+    return matrices
+
+
+def discover_gradient_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
+    """Discover runs produced by the new raw-gradient mode."""
+    rows = []
+    for row in list_runs(results_root):
+        if row["has_gradients"]:
+            rows.append(load_gradient_run(row["dir_label"], row["label"], results_root))
+    rows.sort(
+        key=lambda row: (
+            row["n"] if row["n"] is not None else 10**9,
+            row["l"] if row["l"] is not None else 10**9,
+            row["full_label"],
+        )
+    )
+    return rows
+
+
+def print_gradient_runs(rows: Sequence[Mapping[str, Any]]) -> None:
+    for row in rows:
+        actual = row.get("gradient_num_samples")
+        requested = row.get("gradient_tries")
+        print(
+            f"{row['full_label']:<32} N={str(row['n']):<3} L={str(row['l']):<3} "
+            f"circuit={str(row.get('circuit')):<20} gradients={actual}/{requested}"
+        )
+    print("count=", len(rows))
+
+
+def _gradient_dataset_metadata(row: Mapping[str, Any], dataset: str) -> tuple[Any, Any]:
+    if dataset == "current_dt":
+        return (
+            row.get("gradient_diffusion_number_current"),
+            row.get("gradient_dt_current"),
+        )
+    return (
+        row.get("gradient_diffusion_number_fixed"),
+        row.get("gradient_dt_fixed_diffusion"),
+    )
+
+
+def gradient_run_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    """Summarize each complete gradient vector and all values pooled together."""
+    records = []
+    for row in rows:
+        for dataset, gradients in load_gradient_matrices(row).items():
+            diffusion_number, dt = _gradient_dataset_metadata(row, dataset)
+            records.append(
+                {
+                    "full_label": row["full_label"],
+                    "n": row.get("n"),
+                    "l": row.get("l"),
+                    "circuit": row.get("circuit"),
+                    "dataset": dataset,
+                    "diffusion_number": diffusion_number,
+                    "dt": dt,
+                    "number_of_parameters": gradients.shape[0],
+                    "gradient_sweeps": gradients.shape[1],
+                    "gradient_num_samples": gradients.size,
+                    "gradient_tries_requested": row.get("gradient_tries"),
+                    "mean_gradient": float(np.mean(gradients)),
+                    "mean_gradient_norm": float(np.mean(np.linalg.norm(gradients, axis=0))),
+                    "variance": float(np.var(gradients)),
+                    "gradient_runtime_s": row.get("gradient_runtime_s"),
+                }
+            )
+    columns = [
+        "full_label",
+        "n",
+        "l",
+        "circuit",
+        "dataset",
+        "diffusion_number",
+        "dt",
+        "number_of_parameters",
+        "gradient_sweeps",
+        "gradient_num_samples",
+        "gradient_tries_requested",
+        "mean_gradient",
+        "mean_gradient_norm",
+        "variance",
+        "gradient_runtime_s",
+    ]
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
+def gradient_parameter_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    """Summarize each parameter's scalar gradient distribution separately."""
+    records = []
+    for row in rows:
+        matrices = load_gradient_matrices(row)
+        labels = row.get("gradient_parameter_labels") or []
+        for dataset, gradients in matrices.items():
+            diffusion_number, dt = _gradient_dataset_metadata(row, dataset)
+            for parameter_index, samples in enumerate(gradients):
+                records.append(
+                    {
+                        "full_label": row["full_label"],
+                        "n": row.get("n"),
+                        "l": row.get("l"),
+                        "circuit": row.get("circuit"),
+                        "dataset": dataset,
+                        "diffusion_number": diffusion_number,
+                        "dt": dt,
+                        "parameter_index": parameter_index,
+                        "parameter": (
+                            labels[parameter_index]
+                            if parameter_index < len(labels)
+                            else f"theta_{parameter_index}"
+                        ),
+                        "gradient_sweeps": samples.size,
+                        "mean_gradient": float(np.mean(samples)),
+                        "mean_gradient_norm": float(np.mean(np.abs(samples))),
+                        "variance": float(np.var(samples)),
+                    }
+                )
+    columns = [
+        "full_label",
+        "n",
+        "l",
+        "circuit",
+        "dataset",
+        "diffusion_number",
+        "dt",
+        "parameter_index",
+        "parameter",
+        "gradient_sweeps",
+        "mean_gradient",
+        "mean_gradient_norm",
+        "variance",
+    ]
+    return pd.DataFrame.from_records(records, columns=columns)
 
 
 def load_variance_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:
