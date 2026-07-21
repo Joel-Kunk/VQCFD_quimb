@@ -10,6 +10,10 @@ import functions.circuits_quimb as fcq
 import functions.initial_states as fist
 
 
+def default_variance_tries(n: int, l: int) -> int:
+    return 500 if n >= 5 and l == 8 else 1000
+
+
 @dataclass(slots=True)
 class SimConfig:
     label: str = "L3"
@@ -41,7 +45,7 @@ class SimConfig:
     expr_entcap_samples: int = 100000
     expr_bins: int = 100
 
-    variance_tries: int = 100
+    variance_tries: int | None = None
     
     initial_params: tuple[float, ...] | None = None
     initial_params_presets_file: str = "initial_params_presets.yaml"
@@ -49,6 +53,10 @@ class SimConfig:
     init_param_random_scale: float = 0.1
     init_param_random_center: float = np.pi - 0.25
     random_seed: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.variance_tries is None:
+            self.variance_tries = default_variance_tries(self.n, self.l)
 
     @property
     def results_dir(self) -> Path:

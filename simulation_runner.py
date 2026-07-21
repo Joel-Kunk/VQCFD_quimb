@@ -463,6 +463,13 @@ def build_values(cfg: SimConfig) -> dict[str, float | int | str]:
     }
 
 
+def _variance_progress_interval(total_tries: int, max_lines: int = 50) -> int:
+    """Return a print interval that emits at most ``max_lines`` progress lines."""
+    if max_lines < 1:
+        raise ValueError("max_lines must be at least 1.")
+    return max(1, (int(total_tries) + max_lines - 1) // max_lines)
+
+
 def run_variance_analysis(cfg: SimConfig) -> SimState:
     setup_outputs(cfg)
     xs, _x_plot, _t_plot, _u, mod_init, psi_init = compute_classical_reference(cfg)
@@ -505,6 +512,7 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
 
     grads3: list[float] = []
     start = time.perf_counter()
+    progress_interval = _variance_progress_interval(cfg.variance_tries)
 
     for i in range(cfg.variance_tries):
         params_rand = np.random.random(n_params + 1) * 2 * np.pi
@@ -527,8 +535,12 @@ def run_variance_analysis(cfg: SimConfig) -> SimState:
             rt.unitary_circuit,
         )
         grads3.extend(np.asarray(grad3[1:], dtype=float).tolist())
-        if cfg.verbose:
-            print(f"variance try = {i + 1}/{cfg.variance_tries}")
+        completed_tries = i + 1
+        if cfg.verbose and (
+            completed_tries % progress_interval == 0
+            or completed_tries == cfg.variance_tries
+        ):
+            print(f"variance try = {completed_tries}/{cfg.variance_tries}")
     elapsed = time.perf_counter() - start
 
     variance = float(np.var(grads3)) if grads3 else 0.0
