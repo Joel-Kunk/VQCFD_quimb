@@ -215,9 +215,9 @@ def gradient_of_cost(
     unitary_circuit=None,
 ):
     params1_1 = params1.copy()
-    params1_1[idx] += np.pi / 2
+    params1_1[idx] += fqu.HADAMARD_TEST_PARAMETER_SHIFT
     params1_2 = params1.copy()
-    params1_2[idx] -= np.pi / 2
+    params1_2[idx] -= fqu.HADAMARD_TEST_PARAMETER_SHIFT
 
     quimb_unitary1 = fqu.make_optimization_unitary(
         N, L, params1_1, mod, unitary_circuit
@@ -243,13 +243,19 @@ def gradient_of_cost(
     c42 = fqu.embed_circuit(quimb_unitary2, qc4, wires).local_expectation(qu.pauli("Z"), 0, simplify_sequence="RC")
     c52 = fqu.embed_circuit(quimb_unitary2, qc5, wires).local_expectation(qu.pauli("Z"), 0, simplify_sequence="RC")
 
+    dc1 = fqu.hadamard_test_parameter_shift(c1, c12)
+    dc2 = fqu.hadamard_test_parameter_shift(c2, c22)
+    dc3 = fqu.hadamard_test_parameter_shift(c3, c32)
+    dc4 = fqu.hadamard_test_parameter_shift(c4, c42)
+    dc5 = fqu.hadamard_test_parameter_shift(c5, c52)
+
     cost = -2 * np.real(
         np.conjugate(mod)
         * mod
         * (
-            (c1 - c12) / 2
-            + ((dt * mu / (dx**2)) * ((c2 - c22) / 2 - 2 * (c1 - c12) / 2 + (c3 - c32) / 2))
-            - ((dt * np.conjugate(mod) / (2 * dx)) * ((c4 - c42) / 2 - (c5 - c52) / 2))
+            dc1
+            + ((dt * mu / (dx**2)) * (dc2 - 2 * dc1 + dc3))
+            - ((dt * np.conjugate(mod) / (2 * dx)) * (dc4 - dc5))
         )
     )
 

@@ -4,6 +4,25 @@ import autograd.numpy as anp
 import numpy as np
 import functions.circuits_quimb as fcq
 
+
+HADAMARD_TEST_PARAMETER_SHIFT = np.pi
+
+
+def hadamard_test_parameter_shift(value_plus, value_minus):
+    """Return the exact two-evaluation derivative for a unitary angle.
+
+    In the Hadamard-test objective used here, every current circuit parameter
+    occurs once in a rotation matrix and therefore enters the objective as
+
+        f(theta) = a + b cos(theta / 2) + c sin(theta / 2).
+
+    Thus ``f'(theta) = (f(theta + pi) - f(theta - pi)) / 4``.  Choosing the
+    shift pi keeps the evaluation count at two and maximizes the difference
+    signal, which is also preferable when the two values are shot estimates.
+    """
+    return (value_plus - value_minus) / 4
+
+
 def make_state_circuit(qubits, layers, params, unitary_circuit=None):
     return fcq.make_state_circuit(
         qubits,
@@ -206,9 +225,6 @@ def cost_quimb_shots2(
     return anp.real(cost).astype(anp.float64).reshape(())
 
 
-# using parameter shift rule to get gradients with shot noise. All derivatives are fine, but need to be devided by a factor of 1.414213562692549
-# except for the last one, which is correct as it is.
-
 def grad_param_shift(
     params,
     qc1,
@@ -230,8 +246,8 @@ def grad_param_shift(
     for i in range(1,len(params)):
         params_p = params.copy()
         params_m = params.copy()
-        params_p[i] += np.pi/2
-        params_m[i] -= np.pi/2
+        params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
+        params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
         uni_p = make_optimization_unitary(
             N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
         )
@@ -240,9 +256,7 @@ def grad_param_shift(
         )
         cost_p = cost_quimb_shots(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots)
         cost_m = cost_quimb_shots(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots)
-        grad[i] = (cost_p - cost_m)/2
-
-    grad[1:-1] /= np.sqrt(2)
+        grad[i] = hadamard_test_parameter_shift(cost_p, cost_m)
     
     return grad
 
@@ -449,8 +463,8 @@ def whole_grad_param_shift(
     for i in range(1,len(params)):
         params_p = params.copy()
         params_m = params.copy()
-        params_p[i] += np.pi/2
-        params_m[i] -= np.pi/2
+        params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
+        params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
         uni_p = make_optimization_unitary2(
             N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
         )
@@ -459,9 +473,7 @@ def whole_grad_param_shift(
         )
         cost_p = cost_quimb_cached(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
         cost_m = cost_quimb_cached(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,params[0],wires,dt,dx,mu,trees)
-        grad[i] = (cost_p - cost_m)/2
-    
-    grad[1:-1] /= np.sqrt(2)
+        grad[i] = hadamard_test_parameter_shift(cost_p, cost_m)
     
     return grad
 
