@@ -33,6 +33,15 @@ class RuntimeContext:
     unitary_circuit: str
 
 
+def format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration as a clock value, including centiseconds."""
+    total_centiseconds = max(0, round(float(seconds) * 100))
+    hours, remainder = divmod(total_centiseconds, 360_000)
+    minutes, centiseconds = divmod(remainder, 6_000)
+    whole_seconds, centiseconds = divmod(centiseconds, 100)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
+
+
 def ensure_dirs(cfg: SimConfig) -> None:
     cfg.fig_dir.mkdir(parents=True, exist_ok=True)
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -564,7 +573,8 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
             completed_gradients = completed_sweeps * n_params
             print(
                 f"gradient sweep = {completed_sweeps}/{cfg.gradient_sweeps} "
-                f"({completed_gradients}/{cfg.gradient_num_samples} scalar gradients)"
+                f"({completed_gradients}/{cfg.gradient_num_samples} scalar gradients), "
+                f"elapsed = {format_elapsed(time.perf_counter() - start)}"
             )
     elapsed = time.perf_counter() - start
 
@@ -615,6 +625,7 @@ def run_exp_only(cfg: SimConfig) -> SimState:
         circuit,
         cfg.expr_entcap_samples,
         cfg.expr_bins,
+        verbose=cfg.verbose,
     )
     elapsed = time.perf_counter() - start
     values.update(
@@ -636,7 +647,7 @@ def run_exp_only(cfg: SimConfig) -> SimState:
     if cfg.verbose:
         print(f"expressibility = {state.values['expressibility']}")
         print(f"entangling capability = {state.values['entangling_capability']}")
-        print(f"expr runtime = {elapsed:.3f} s")
+        print(f"expr runtime = {format_elapsed(elapsed)} ({elapsed:.3f} s)")
 
     return state
 
@@ -674,7 +685,12 @@ def run_simulation(cfg: SimConfig) -> SimState:
 
     if cfg.compute_expr_cap:
         circ = fex.unitary_pure(cfg.n, cfg.l, rt.unitary_circuit)
-        exp_and_cap = fex.expr_and_ent_cap(circ, cfg.expr_entcap_samples, cfg.expr_bins)
+        exp_and_cap = fex.expr_and_ent_cap(
+            circ,
+            cfg.expr_entcap_samples,
+            cfg.expr_bins,
+            verbose=cfg.verbose,
+        )
         state.values["expressibility"] = float(exp_and_cap[0])
         state.values["entangling_capability"] = float(exp_and_cap[1])
 

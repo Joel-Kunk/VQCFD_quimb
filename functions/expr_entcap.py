@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 from scipy.stats import entropy
 import quimb as qu
@@ -87,11 +89,23 @@ def entangling_capability(circ, tries):
     return ent_cap
 
 
-def expr_and_ent_cap(circ, tries, n_bins):
+def _format_elapsed(seconds: float) -> str:
+    total_centiseconds = max(0, round(float(seconds) * 100))
+    hours, remainder = divmod(total_centiseconds, 360_000)
+    minutes, centiseconds = divmod(remainder, 6_000)
+    whole_seconds, centiseconds = divmod(centiseconds, 100)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
+
+
+def expr_and_ent_cap(circ, tries, n_bins, *, verbose=True):
     n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     fidelities = []
     ent_cap = 0.0
+    start = time.perf_counter()
+
+    if verbose:
+        print(f"expression samples = 0/{tries}, elapsed = {_format_elapsed(0)}")
 
     for i in range(tries):
         params_t1 = np.random.random(num_params) * 2 * np.pi
@@ -109,8 +123,10 @@ def expr_and_ent_cap(circ, tries, n_bins):
         for j in range(n):
             ent_cap += special_distance(vec_t1, vec_t1, j)
 
-        if i % 1000 == 0:
-            print(f"Progress: {i}/{tries} ")
+        completed = i + 1
+        if verbose and (completed % 1000 == 0 or completed == tries):
+            elapsed = _format_elapsed(time.perf_counter() - start)
+            print(f"expression samples = {completed}/{tries}, elapsed = {elapsed}")
 
     p_pqc = np.histogram(fidelities, bins=n_bins)
     bins = p_pqc[1]

@@ -1,4 +1,6 @@
-from simulation_runner import SimConfig, run_simulation
+import time
+
+from simulation_runner import SimConfig, format_elapsed, run_simulation
 
 import functions.circuits_quimb as fcq
 import functions.initial_states as fist
@@ -36,16 +38,19 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
+        mode="exp_only",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
         # `exp_only` always computes both metrics; this flag is for full runs.
         compute_expr_cap=False,
         # None selects the default circuit and omits the circuit label suffix.
-        unitary_circuit="multiscale_tree",
+        unitary_circuit=None,
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree"
-        initial_state="positive_periodic_wave",
+        initial_state=None,
         # Options: "positive_hump", "positive_periodic_wave",
         # "mixed_sine_modes", "tapered_gaussian", "tapered_tanh"
+        gradient_tries = 5000,
+        expr_entcap_samples = 2000,
+        dir_label = "tests",
     )
 
     if run_mode == "single":
@@ -69,23 +74,34 @@ def main() -> None:
         ]
         todo = pairs
     elif run_mode == "grid":
-        ns = [2,3,4,5,6]
-        ls = [1,2,3,4,5,6,7,8]
+        ns = [2,3,4]
+        ls = [1,2]
         todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")
 
     failures: list[tuple[int, int, str]] = []
-    for n, l in todo:
-        print(f"\n=== Running N={n}, L={l} ===")
+    total_runs = len(todo)
+    sweep_start = time.perf_counter()
+    for run_number, (n, l) in enumerate(todo, start=1):
+        run_start = time.perf_counter()
+        print(f"\n=== Run {run_number}/{total_runs}: Starting N={n}, L={l} ===")
         try:
             cfg = build_sweep_cfg(n=n, l=l, **common)
             run_simulation(cfg)
         except Exception as exc:  # keep sweep running if one pair fails
             failures.append((n, l, str(exc)))
-            print(f"FAILED N={n}, L={l}: {exc}")
+            elapsed = format_elapsed(time.perf_counter() - run_start)
+            print(f"=== Run {run_number}/{total_runs} FAILED after {elapsed}: {exc} ===")
+        else:
+            elapsed = format_elapsed(time.perf_counter() - run_start)
+            print(f"=== Run {run_number}/{total_runs} finished in {elapsed} ===")
 
-    print(f"\nSweep finished. total={len(todo)}, failed={len(failures)}")
+    sweep_elapsed = format_elapsed(time.perf_counter() - sweep_start)
+    print(
+        f"\nSweep finished in {sweep_elapsed}. "
+        f"total={total_runs}, failed={len(failures)}"
+    )
     for n, l, msg in failures:
         print(f" - N={n}, L={l}: {msg}")
 
