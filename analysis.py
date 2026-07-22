@@ -1064,6 +1064,7 @@ def gradient_run_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
                     "n": row.get("n"),
                     "l": row.get("l"),
                     "circuit": row.get("circuit"),
+                    "initial_state": row.get("initial_state"),
                     "dataset": dataset,
                     "diffusion_number": diffusion_number,
                     "dt": dt,
@@ -1082,6 +1083,7 @@ def gradient_run_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
         "n",
         "l",
         "circuit",
+        "initial_state",
         "dataset",
         "diffusion_number",
         "dt",
@@ -1112,9 +1114,11 @@ def gradient_parameter_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
                         "n": row.get("n"),
                         "l": row.get("l"),
                         "circuit": row.get("circuit"),
+                        "initial_state": row.get("initial_state"),
                         "dataset": dataset,
                         "diffusion_number": diffusion_number,
                         "dt": dt,
+                        "number_of_parameters": gradients.shape[0],
                         "parameter_index": parameter_index,
                         "parameter": (
                             labels[parameter_index]
@@ -1132,9 +1136,11 @@ def gradient_parameter_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
         "n",
         "l",
         "circuit",
+        "initial_state",
         "dataset",
         "diffusion_number",
         "dt",
+        "number_of_parameters",
         "parameter_index",
         "parameter",
         "gradient_sweeps",
@@ -1143,6 +1149,226 @@ def gradient_parameter_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
         "variance",
     ]
     return pd.DataFrame.from_records(records, columns=columns)
+
+
+def filter_gradient_table(
+    table: pd.DataFrame | Sequence[Mapping[str, Any]],
+    ns: Iterable[int] | int | None = None,
+    ls: Iterable[int] | int | None = None,
+    circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
+    datasets: Iterable[str] | str | None = None,
+) -> pd.DataFrame:
+    """Filter a run-level or parameter-level gradient statistics table."""
+    filtered = _as_table(table)
+    for column, selected in (
+        ("n", ns),
+        ("l", ls),
+        ("circuit", circuits),
+        ("initial_state", initial_states),
+        ("dataset", datasets),
+    ):
+        if selected is None:
+            continue
+        if column not in filtered.columns:
+            raise KeyError(f"Gradient table has no {column!r} column.")
+        allowed = {selected} if isinstance(selected, (str, int, np.integer)) else set(selected)
+        filtered = filtered[filtered[column].isin(allowed)]
+    return filtered.reset_index(drop=True)
+
+
+def _gradient_group_columns(group_by: str | Sequence[str] | None) -> list[str]:
+    if group_by is None:
+        return []
+    return [group_by] if isinstance(group_by, str) else list(group_by)
+
+
+def _plot_gradient_table(
+    table: pd.DataFrame,
+    x: str,
+    y: str,
+    group_by: str | Sequence[str] | None,
+    kind: str,
+    log_x: bool,
+    log_y: bool,
+    ax,
+):
+    for column in (x, y):
+        if column not in table.columns:
+            raise KeyError(f"Unknown column {column!r}. Available columns: {list(table.columns)}")
+    group_columns = _gradient_group_columns(group_by)
+    missing_groups = [column for column in group_columns if column not in table.columns]
+    if missing_groups:
+        raise KeyError(f"Unknown group_by columns: {missing_groups}.")
+    if kind not in {"line", "scatter"}:
+        raise ValueError("kind must be 'line' or 'scatter'")
+
+    filtered = table.dropna(subset=[x, y]).reset_index(drop=True)
+    if filtered.empty:
+        raise ValueError("No rows remain after filtering and dropping missing x/y values.")
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9, 5))
+
+    if group_columns:
+        group_key = group_columns[0] if len(group_columns) == 1 else group_columns
+        grouped = filtered.groupby(group_key, dropna=False, sort=True)
+    else:
+        grouped = [(None, filtered)]
+    for group_value, group in grouped:
+        group = group.sort_values(x, kind="stable")
+        if group_columns:
+            values = group_value if isinstance(group_value, tuple) else (group_value,)
+            label = ", ".join(
+                f"{column}={value}" for column, value in zip(group_columns, values)
+            )
+        else:
+            label = None
+        if kind == "scatter":
+            ax.scatter(group[x], group[y], label=label)
+        else:
+            ax.plot(group[x], group[y], marker="o", label=label)
+
+    ax.set_xlabel(x)
+    ax.set_ylabel(y)
+    grouping = "" if not group_columns else f" grouped by {', '.join(group_columns)}"
+    ax.set_title(f"{y} vs {x}{grouping}")
+    if log_x:
+        ax.set_xscale("log")
+    if log_y:
+        ax.set_yscale("log")
+    if group_columns:
+        ax.legend()
+    return filtered, ax
+
+
+def plot_gradient_run_table(
+    table: pd.DataFrame | Sequence[Mapping[str, Any]],
+    x: str,
+    y: str,
+    ns: Iterable[int] | int | None = None,
+    ls: Iterable[int] | int | None = None,
+    circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
+    datasets: Iterable[str] | str | None = None,
+    group_by: str | Sequence[str] | None = None,
+    kind: str = "line",
+    log_x: bool = False,
+    log_y: bool = False,
+    ax=None,
+):
+    """Plot any two overall-gradient columns with configurable filters and grouping."""
+    filtered = filter_gradient_table(
+        table,
+        ns=ns,
+        ls=ls,
+        circuits=circuits,
+        initial_states=initial_states,
+        datasets=datasets,
+    )
+    return _plot_gradient_table(filtered, x, y, group_by, kind, log_x, log_y, ax)
+
+
+def _middle_layer_parameter_index(row: Mapping[str, Any]) -> int:
+    n_value = row.get("n")
+    l_value = row.get("l")
+    if pd.isna(n_value) or pd.isna(l_value):
+        raise ValueError("The 'mid' selector requires N and L metadata for every run.")
+    n = int(n_value)
+    layers = int(l_value)
+    circuit = fcq.resolve_unitary_circuit(row.get("circuit"))
+    total = int(row.get("number_of_parameters") or fcq.num_unitary_parameters(n, layers, circuit))
+    if layers < 1:
+        return total // 2
+
+    final_layer_parameters = fcq.num_unitary_parameters(n, 0, circuit)
+    repeated_parameters = total - final_layer_parameters
+    if repeated_parameters % layers:
+        raise ValueError(
+            f"Cannot identify equal parameter layers for {row.get('full_label', '<unknown>')}."
+        )
+    parameters_per_layer = repeated_parameters // layers
+    return (layers // 2) * parameters_per_layer + parameters_per_layer // 2
+
+
+def _select_gradient_parameters(
+    table: pd.DataFrame,
+    parameters: Iterable[int | str] | int | str | None,
+) -> pd.DataFrame:
+    if parameters is None:
+        selected = table.copy()
+        selected["parameter_selection"] = selected["parameter_index"].astype(str)
+        return selected
+    selectors = [parameters] if isinstance(parameters, (str, int, np.integer)) else list(parameters)
+    if not selectors:
+        raise ValueError("parameters must contain at least one index or 'mid'.")
+
+    selected_groups = []
+    for (_full_label, _dataset), group in table.groupby(
+        ["full_label", "dataset"], dropna=False, sort=False
+    ):
+        first = group.iloc[0]
+        parameter_count = int(first["number_of_parameters"])
+        for selector in selectors:
+            if isinstance(selector, str):
+                if selector.strip().lower() != "mid":
+                    raise ValueError("String parameter selectors must be 'mid'.")
+                resolved = _middle_layer_parameter_index(first)
+                selection_label = "mid"
+            elif isinstance(selector, (int, np.integer)):
+                resolved = int(selector)
+                if resolved < 0:
+                    resolved += parameter_count
+                selection_label = str(int(selector))
+            else:
+                raise TypeError("Parameter selectors must be integers or 'mid'.")
+            if not 0 <= resolved < parameter_count:
+                raise IndexError(
+                    f"Parameter {selector!r} is out of range for {first['full_label']} "
+                    f"with {parameter_count} parameters."
+                )
+            match = group[group["parameter_index"] == resolved].copy()
+            if match.empty:
+                raise ValueError(
+                    f"Parameter table has no index {resolved} for {first['full_label']}."
+                )
+            match["parameter_selection"] = selection_label
+            selected_groups.append(match)
+    if not selected_groups:
+        raise ValueError("No parameter rows remain after filtering.")
+    return pd.concat(selected_groups, ignore_index=True)
+
+
+def plot_gradient_parameter_table(
+    table: pd.DataFrame | Sequence[Mapping[str, Any]],
+    x: str,
+    y: str,
+    parameters: Iterable[int | str] | int | str | None = None,
+    ns: Iterable[int] | int | None = None,
+    ls: Iterable[int] | int | None = None,
+    circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
+    datasets: Iterable[str] | str | None = None,
+    group_by: str | Sequence[str] | None = None,
+    kind: str = "line",
+    log_x: bool = False,
+    log_y: bool = False,
+    ax=None,
+):
+    """Plot selected scalar-parameter gradient statistics.
+
+    Parameter selectors can be non-negative indices, negative Python-style
+    indices, or ``"mid"`` for the middle parameter of the middle repeated layer.
+    """
+    filtered = filter_gradient_table(
+        table,
+        ns=ns,
+        ls=ls,
+        circuits=circuits,
+        initial_states=initial_states,
+        datasets=datasets,
+    )
+    selected = _select_gradient_parameters(filtered, parameters)
+    return _plot_gradient_table(selected, x, y, group_by, kind, log_x, log_y, ax)
 
 
 def load_variance_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:

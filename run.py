@@ -48,19 +48,17 @@ def main() -> None:
         initial_state=None,
         # Options: "positive_hump", "positive_periodic_wave",
         # "mixed_sine_modes", "tapered_gaussian", "tapered_tanh"
-        gradient_tries = 5000,
-        expr_entcap_samples = 2000,
-        dir_label = "tests",
+        expr_entcap_samples = 20000,
     )
 
     if run_mode == "single":
         cfg = build_sweep_cfg(
-            n=4,
-            l=6,
+            n=7,
+            l=1,
             # For single runs these are used verbatim. Remove either argument
             # to fall back to the automatic mode/circuit/initial-state-aware path.
-            dir_label="tests",
-            label="N4_multiscale_tree_L6_tapered_tanh",
+            # dir_label="tests",
+            # label="N4_multiscale_tree_L6_tapered_tanh",
             **common,
         )
         run_simulation(cfg)
@@ -74,7 +72,7 @@ def main() -> None:
         ]
         todo = pairs
     elif run_mode == "grid":
-        ns = [2,3,4]
+        ns = [8,9]
         ls = [1,2]
         todo = [(n, l) for n in ns for l in ls]
     else:
