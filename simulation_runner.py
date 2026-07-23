@@ -69,6 +69,8 @@ def save_manifest(cfg: SimConfig, manifest_path: Path | None = None) -> Path:
             {
                 "gradient_sweeps": cfg.gradient_sweeps,
                 "gradient_num_samples": cfg.gradient_num_samples,
+                "gradient_num_values_saved": 5 * cfg.gradient_num_samples,
+                "gradient_storage": "five_local_expectation_derivatives",
             }
         )
     with manifest_path.open("w", encoding="utf-8") as fh:
@@ -489,8 +491,6 @@ def _gradient_progress_interval(total_sweeps: int, max_lines: int = 50) -> int:
 
 
 def run_gradient_analysis(cfg: SimConfig) -> SimState:
-    if cfg.mu <= 0:
-        raise ValueError("gradient mode requires positive mu to set a diffusion number.")
     if cfg.gradient_sweeps < 1:
         raise ValueError(
             f"gradient_tries={cfg.gradient_tries} is smaller than the circuit's "
@@ -500,8 +500,6 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
     setup_outputs(cfg)
     xs, _x_plot, _t_plot, _u, mod_init, psi_init = compute_classical_reference(cfg)
     dx = xs[1] - xs[0]
-    fixed_diffusion_dt = cfg.gradient_diffusion_number * dx**2 / cfg.mu
-    current_diffusion_number = cfg.mu * cfg.dt / dx**2
 
     rt = build_runtime(cfg)
     values = build_values(cfg)
@@ -538,33 +536,27 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
         fqu.build_local_exp_tree(unitary0, qc5, wires),
     ]
 
-    gradients_current = np.empty((n_params, cfg.gradient_sweeps), dtype=float)
-    gradients_fixed_diffusion = np.empty_like(gradients_current)
+    circuit_derivatives = np.empty((5, n_params, cfg.gradient_sweeps), dtype=float)
     start = time.perf_counter()
     progress_interval = _gradient_progress_interval(cfg.gradient_sweeps)
 
     for i in range(cfg.gradient_sweeps):
         params_rand = np.random.random(n_params + 1) * 2 * np.pi
         params_rand[0] = 1.0
-        paired_gradients = fqu.whole_grads_param_shift(
+        local_gradients = fqu.whole_local_expectation_grads_param_shift(
             params_rand,
             qc1,
             qc2,
             qc3,
             qc4,
             qc5,
-            params_ref[0],
             wires,
-            [cfg.dt, fixed_diffusion_dt],
-            dx,
-            cfg.mu,
             cfg.n,
             cfg.l,
             trees,
             rt.unitary_circuit,
         )
-        gradients_current[:, i] = paired_gradients[0, 1:]
-        gradients_fixed_diffusion[:, i] = paired_gradients[1, 1:]
+        circuit_derivatives[:, :, i] = local_gradients[:, 1:]
         completed_sweeps = i + 1
         if cfg.verbose and (
             completed_sweeps % progress_interval == 0
@@ -581,12 +573,19 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
     state.values["gradient_tries"] = int(cfg.gradient_tries)
     state.values["gradient_sweeps"] = int(cfg.gradient_sweeps)
     state.values["gradient_num_samples"] = int(cfg.gradient_num_samples)
+    state.values["gradient_num_values_saved"] = int(5 * cfg.gradient_num_samples)
+    state.values["gradient_storage"] = "five_local_expectation_derivatives"
     state.values["gradient_runtime_s"] = float(elapsed)
-    state.values["gradient_diffusion_number_current"] = float(current_diffusion_number)
-    state.values["gradient_diffusion_number_fixed"] = float(cfg.gradient_diffusion_number)
-    state.values["gradient_dt_current"] = float(cfg.dt)
-    state.values["gradient_dt_fixed_diffusion"] = float(fixed_diffusion_dt)
-    state.values["gradient_shape"] = [int(n_params), int(cfg.gradient_sweeps)]
+    state.values["gradient_dx"] = float(dx)
+    state.values["gradient_lbd0"] = float(params_ref[0])
+    state.values["gradient_lbd0_t"] = float(params_ref[0])
+    state.values["gradient_shape"] = [5, int(n_params), int(cfg.gradient_sweeps)]
+    state.values["gradient_circuit_labels"] = [f"c{i}" for i in range(1, 6)]
+    state.values["gradient_contribution_definitions"] = {
+        "contribution_1": "dc1",
+        "contribution_2": "dc2 - 2*dc1 + dc3",
+        "contribution_3": "dc4 - dc5",
+    }
     state.values["gradient_parameter_labels"] = [f"theta_{i}" for i in range(n_params)]
     state.times.append(elapsed)
     state.shots_per_timestep.append(0)
@@ -594,12 +593,8 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
     state.values["shots_used_total"] = 0
 
     np.save(
-        cfg.data_dir / f"gradients_current_{cfg.full_label}.npy",
-        gradients_current,
-    )
-    np.save(
-        cfg.data_dir / f"gradients_fixed_diffusion_{cfg.full_label}.npy",
-        gradients_fixed_diffusion,
+        cfg.data_dir / f"gradient_circuit_derivatives_{cfg.full_label}.npy",
+        circuit_derivatives,
     )
     with (cfg.data_dir / f"values_{cfg.full_label}.yaml").open("w", encoding="utf-8") as fh:
         yaml.safe_dump(state.values, fh, sort_keys=False)

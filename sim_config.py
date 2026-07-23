@@ -61,7 +61,6 @@ class SimConfig:
     # Requested number of scalar parameter gradients. Gradient mode rounds this
     # down to the nearest complete random-parameter sweep.
     gradient_tries: int | None = None
-    gradient_diffusion_number: float = 0.1
     
     initial_params: tuple[float, ...] | None = None
     initial_params_presets_file: str = "initial_params_presets.yaml"
@@ -75,8 +74,6 @@ class SimConfig:
             self.gradient_tries = default_gradient_tries(self.n)
         if self.gradient_tries is not None and self.gradient_tries < 1:
             raise ValueError("gradient_tries must be at least 1.")
-        if self.mode == "gradient" and self.gradient_diffusion_number <= 0:
-            raise ValueError("gradient_diffusion_number must be positive.")
 
     @property
     def results_dir(self) -> Path:

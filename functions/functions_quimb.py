@@ -445,33 +445,26 @@ def cost_quimb_cached(unitary, qc1, qc2, qc3, qc4, qc5,
     return cost_from_local_expectations(expectations, lbd0_t, lbd0, dt, dx, mu)
 
 
-def whole_grads_param_shift(
+def whole_local_expectation_grads_param_shift(
     params,
     qc1,
     qc2,
     qc3,
     qc4,
     qc5,
-    lbd0_t,
     wires,
-    dts,
-    dx,
-    mu,
     N,
     L,
     trees,
     unitary_circuit=None,
 ):
-    """Return gradients for several ``dt`` values using one pair of evaluations.
+    """Return derivatives of all five local expectations for every parameter.
 
-    The five expectation values are independent of ``dt``. Their shifted
-    derivatives are therefore evaluated once per parameter, then combined with
-    each requested set of PDE coefficients. The result has shape
-    ``(len(dts), len(params))`` and includes the unused norm slot at index zero.
+    The result has shape ``(5, len(params))``. Index zero on the parameter axis
+    is the unused norm slot; the remaining columns are the circuit-angle
+    derivatives obtained from the same two shifted circuit evaluations.
     """
-    dts = np.atleast_1d(np.asarray(dts, dtype=float))
-    grads = np.zeros((dts.size, len(params)), dtype=float)
-    lbd0_t_conj = np.conjugate(lbd0_t)
+    local_grads = np.zeros((5, len(params)), dtype=float)
 
     for i in range(1, len(params)):
         params_p = params.copy()
@@ -490,19 +483,30 @@ def whole_grads_param_shift(
         exp_m = local_expectations_cached(
             uni_m, qc1, qc2, qc3, qc4, qc5, wires, trees
         )
-        dc1, dc2, dc3, dc4, dc5 = hadamard_test_parameter_shift(exp_p, exp_m)
+        local_grads[:, i] = np.real(
+            hadamard_test_parameter_shift(exp_p, exp_m)
+        )
 
-        for dt_index, dt in enumerate(dts):
-            bracket_derivative = (
-                dc1
-                + (dt * mu / dx**2) * (dc2 - 2 * dc1 + dc3)
-                - (dt * lbd0_t_conj / (2 * dx)) * (dc4 - dc5)
-            )
-            grads[dt_index, i] = float(
-                -2 * np.real(lbd0_t_conj * params[0] * bracket_derivative)
-            )
+    return local_grads
 
-    return grads
+
+def cost_gradient_from_local_expectation_gradients(
+    local_grads,
+    lbd0_t,
+    lbd0,
+    dt,
+    dx,
+    mu,
+):
+    """Combine the five saved expectation derivatives into the cost gradient."""
+    dc1, dc2, dc3, dc4, dc5 = np.asarray(local_grads)
+    lbd0_t_conj = np.conjugate(lbd0_t)
+    bracket_derivative = (
+        dc1
+        + (dt * mu / dx**2) * (dc2 - 2 * dc1 + dc3)
+        - (dt * lbd0_t_conj / (2 * dx)) * (dc4 - dc5)
+    )
+    return -2 * np.real(lbd0_t_conj * lbd0 * bracket_derivative)
 
 def whole_grad_param_shift(
     params,
@@ -521,23 +525,27 @@ def whole_grad_param_shift(
     trees,
     unitary_circuit=None,
 ):
-    return whole_grads_param_shift(
+    local_grads = whole_local_expectation_grads_param_shift(
         params,
         qc1,
         qc2,
         qc3,
         qc4,
         qc5,
-        lbd0_t,
         wires,
-        [dt],
-        dx,
-        mu,
         N,
         L,
         trees,
         unitary_circuit,
-    )[0]
+    )
+    return cost_gradient_from_local_expectation_gradients(
+        local_grads,
+        lbd0_t,
+        params[0],
+        dt,
+        dx,
+        mu,
+    )
 
 
 def grad_mod(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu):

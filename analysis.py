@@ -157,12 +157,8 @@ class RunData:
         return None if value is None else float(value)
 
     @property
-    def gradients_current(self):
-        return self.load_array("gradients_current")
-
-    @property
-    def gradients_fixed_diffusion(self):
-        return self.load_array("gradients_fixed_diffusion")
+    def gradient_circuit_derivatives(self):
+        return self.load_array("gradient_circuit_derivatives")
 
 
 def _run_paths(dir_label: str, label: str, results_root: Path = RESULTS_ROOT):
@@ -187,8 +183,7 @@ def load_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> R
         "times": data_dir / f"times_{full_label}.npy",
         "variance": data_dir / f"variance_{full_label}.npy",
         "variance_grads": data_dir / f"variance_grads_{full_label}.npy",
-        "gradients_current": data_dir / f"gradients_current_{full_label}.npy",
-        "gradients_fixed_diffusion": data_dir / f"gradients_fixed_diffusion_{full_label}.npy",
+        "gradient_circuit_derivatives": data_dir / f"gradient_circuit_derivatives_{full_label}.npy",
         "num_evals": data_dir / f"num_evals_{full_label}.npy",
     }
     return RunData(
@@ -231,8 +226,7 @@ def load_expr_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT)
         "times": data_dir / f"times_{full_label}.npy",
         "variance": data_dir / f"variance_{full_label}.npy",
         "variance_grads": data_dir / f"variance_grads_{full_label}.npy",
-        "gradients_current": data_dir / f"gradients_current_{full_label}.npy",
-        "gradients_fixed_diffusion": data_dir / f"gradients_fixed_diffusion_{full_label}.npy",
+        "gradient_circuit_derivatives": data_dir / f"gradient_circuit_derivatives_{full_label}.npy",
         "num_evals": data_dir / f"num_evals_{full_label}.npy",
     }
     return RunData(
@@ -321,8 +315,7 @@ def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
                     "values_yaml",
                     "params",
                     "variance",
-                    "gradients_current",
-                    "gradients_fixed_diffusion",
+                    "gradient_circuit_derivatives",
                 )
             ):
                 # The directory can contain only an independently named
@@ -343,10 +336,7 @@ def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
                     "has_costs": run.files["costs"].exists(),
                     "has_params": run.files["params"].exists(),
                     "has_variance": run.files["variance"].exists() or run.variance is not None,
-                    "has_gradients": (
-                        run.files["gradients_current"].exists()
-                        or run.files["gradients_fixed_diffusion"].exists()
-                    ),
+                    "has_gradients": run.files["gradient_circuit_derivatives"].exists(),
                     "path": str(data_dir),
                 }
             )
@@ -938,6 +928,10 @@ def plot_run_table(
 def load_gradient_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:
     """Load the metadata and array paths for one gradient-mode run."""
     run = load_run(dir_label, label, results_root)
+    n = run.n
+    dx = run.metadata("gradient_dx")
+    if dx is None and n is not None:
+        dx = 1.0 / (2**n - 1)
     return {
         "dir_label": dir_label,
         "label": label,
@@ -954,43 +948,23 @@ def load_gradient_run(dir_label: str, label: str, results_root: Path = RESULTS_R
         "gradient_tries": run.metadata("gradient_tries"),
         "gradient_sweeps": run.metadata("gradient_sweeps"),
         "gradient_num_samples": run.metadata("gradient_num_samples"),
+        "gradient_num_values_saved": run.metadata("gradient_num_values_saved"),
         "gradient_runtime_s": run.metadata("gradient_runtime_s"),
-        "gradient_diffusion_number_current": run.metadata("gradient_diffusion_number_current"),
-        "gradient_diffusion_number_fixed": run.metadata("gradient_diffusion_number_fixed"),
-        "gradient_dt_current": run.metadata("gradient_dt_current", run.metadata("dt")),
-        "gradient_dt_fixed_diffusion": run.metadata("gradient_dt_fixed_diffusion"),
+        "dt": run.metadata("dt"),
+        "mu": run.metadata("mu"),
+        "dx": dx,
+        "gradient_lbd0": run.metadata("gradient_lbd0", 1.0),
+        "gradient_lbd0_t": run.metadata("gradient_lbd0_t", 1.0),
+        "gradient_circuit_labels": run.metadata("gradient_circuit_labels"),
         "gradient_parameter_labels": run.metadata("gradient_parameter_labels"),
-        "gradients_current_path": run.files["gradients_current"],
-        "gradients_fixed_diffusion_path": run.files["gradients_fixed_diffusion"],
+        "gradient_circuit_derivatives_path": run.files["gradient_circuit_derivatives"],
     }
 
 
-def _parameter_gradient_matrix(path: Path, number_of_parameters: int) -> np.ndarray:
-    """Load a gradient array and orient it as parameter x sweep."""
-    gradients = np.asarray(np.load(path), dtype=float)
-    if gradients.ndim == 1:
-        if gradients.size % number_of_parameters:
-            raise ValueError(
-                f"Gradient array {path} has {gradients.size} entries, which is not "
-                f"divisible by {number_of_parameters} parameters."
-            )
-        return gradients.reshape(-1, number_of_parameters).T
-    if gradients.ndim != 2:
-        raise ValueError(f"Gradient array {path} must be one- or two-dimensional.")
-    if gradients.shape[0] == number_of_parameters:
-        return gradients
-    if gradients.shape[1] == number_of_parameters:
-        return gradients.T
-    raise ValueError(
-        f"Neither dimension of gradient array {path} matches the expected "
-        f"{number_of_parameters} parameters: shape={gradients.shape}."
-    )
-
-
-def load_gradient_matrices(
+def load_gradient_circuit_derivatives(
     item: RunData | Mapping[str, Any],
-) -> dict[str, np.ndarray]:
-    """Return available gradient matrices keyed by coefficient variant."""
+) -> np.ndarray:
+    """Load the raw array with axes ``(circuit, parameter, sweep)``."""
     if isinstance(item, RunData):
         row = load_gradient_run(item.dir_label, item.label, item.results_dir.parent)
     else:
@@ -998,19 +972,65 @@ def load_gradient_matrices(
     number_of_parameters = row.get("number_of_parameters")
     if number_of_parameters is None:
         raise ValueError(f"Run {row.get('full_label', '<unknown>')} has no parameter count.")
+    path_value = row.get("gradient_circuit_derivatives_path")
+    if path_value is None:
+        raise FileNotFoundError(
+            f"Run {row.get('full_label', '<unknown>')} has no circuit-derivative path."
+        )
+    path = Path(path_value)
+    if not path.exists():
+        raise FileNotFoundError(f"Circuit-derivative array not found: {path}")
+    derivatives = np.asarray(np.load(path), dtype=float)
+    expected_parameters = int(number_of_parameters)
+    if derivatives.ndim != 3 or derivatives.shape[:2] != (5, expected_parameters):
+        raise ValueError(
+            f"Circuit-derivative array {path} must have shape "
+            f"(5, {expected_parameters}, sweeps), received {derivatives.shape}."
+        )
+    return derivatives
 
-    matrices = {}
-    for dataset, key in (
-        ("current_dt", "gradients_current_path"),
-        ("fixed_diffusion", "gradients_fixed_diffusion_path"),
-    ):
-        path_value = row.get(key)
-        if path_value is None:
-            continue
-        path = Path(path_value)
-        if path.exists():
-            matrices[dataset] = _parameter_gradient_matrix(path, int(number_of_parameters))
-    return matrices
+
+def load_gradient_components(
+    item: RunData | Mapping[str, Any],
+) -> dict[str, np.ndarray]:
+    """Derive total, contribution, and individual-circuit gradient matrices."""
+    row = (
+        load_gradient_run(item.dir_label, item.label, item.results_dir.parent)
+        if isinstance(item, RunData)
+        else item
+    )
+    raw = load_gradient_circuit_derivatives(row)
+    dc1, dc2, dc3, dc4, dc5 = raw
+    contribution_1 = dc1
+    contribution_2 = dc2 - 2 * dc1 + dc3
+    contribution_3 = dc4 - dc5
+
+    dt = float(row["dt"])
+    mu = float(row["mu"])
+    dx = float(row["dx"])
+    lbd0 = float(row.get("gradient_lbd0", 1.0))
+    lbd0_t = float(row.get("gradient_lbd0_t", 1.0))
+    lbd0_t_conj = np.conjugate(lbd0_t)
+    total = -2 * np.real(
+        lbd0_t_conj
+        * lbd0
+        * (
+            contribution_1
+            + (dt * mu / dx**2) * contribution_2
+            - (dt * lbd0_t_conj / (2 * dx)) * contribution_3
+        )
+    )
+    return {
+        "total": total,
+        "contribution_1": contribution_1,
+        "contribution_2": contribution_2,
+        "contribution_3": contribution_3,
+        "circuit_1": dc1,
+        "circuit_2": dc2,
+        "circuit_3": dc3,
+        "circuit_4": dc4,
+        "circuit_5": dc5,
+    }
 
 
 def discover_gradient_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
@@ -1040,106 +1060,149 @@ def print_gradient_runs(rows: Sequence[Mapping[str, Any]]) -> None:
     print("count=", len(rows))
 
 
-def _gradient_dataset_metadata(row: Mapping[str, Any], dataset: str) -> tuple[Any, Any]:
-    if dataset == "current_dt":
-        return (
-            row.get("gradient_diffusion_number_current"),
-            row.get("gradient_dt_current"),
-        )
-    return (
-        row.get("gradient_diffusion_number_fixed"),
-        row.get("gradient_dt_fixed_diffusion"),
-    )
+GRADIENT_EXTRA_COMPONENTS = (
+    "contribution_1",
+    "contribution_2",
+    "contribution_3",
+    "circuit_1",
+    "circuit_2",
+    "circuit_3",
+    "circuit_4",
+    "circuit_5",
+)
+GRADIENT_STATISTICS = ("mean_gradient", "mean_gradient_norm", "variance")
+
+
+def _gradient_statistics(gradients: np.ndarray, per_parameter: bool) -> dict[str, float]:
+    norm = np.abs(gradients) if per_parameter else np.linalg.norm(gradients, axis=0)
+    return {
+        "mean_gradient": float(np.mean(gradients)),
+        "mean_gradient_norm": float(np.mean(norm)),
+        "variance": float(np.var(gradients)),
+    }
+
+
+def _add_component_statistics(
+    record: dict[str, Any],
+    components: Mapping[str, np.ndarray],
+    per_parameter: bool,
+) -> None:
+    record.update(_gradient_statistics(components["total"], per_parameter))
+    for component in GRADIENT_EXTRA_COMPONENTS:
+        for statistic, value in _gradient_statistics(
+            components[component], per_parameter
+        ).items():
+            record[f"{component}_{statistic}"] = value
+
+
+def _gradient_statistic_columns() -> list[str]:
+    return [
+        f"{component}_{statistic}"
+        for component in GRADIENT_EXTRA_COMPONENTS
+        for statistic in GRADIENT_STATISTICS
+    ]
 
 
 def gradient_run_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
-    """Summarize each complete gradient vector and all values pooled together."""
+    """Summarize total, contribution, and circuit gradients for each run."""
     records = []
     for row in rows:
-        for dataset, gradients in load_gradient_matrices(row).items():
-            diffusion_number, dt = _gradient_dataset_metadata(row, dataset)
-            records.append(
-                {
-                    "full_label": row["full_label"],
-                    "n": row.get("n"),
-                    "l": row.get("l"),
-                    "circuit": row.get("circuit"),
-                    "initial_state": row.get("initial_state"),
-                    "dataset": dataset,
-                    "diffusion_number": diffusion_number,
-                    "dt": dt,
-                    "number_of_parameters": gradients.shape[0],
-                    "gradient_sweeps": gradients.shape[1],
-                    "gradient_num_samples": gradients.size,
-                    "gradient_tries_requested": row.get("gradient_tries"),
-                    "mean_gradient": float(np.mean(gradients)),
-                    "mean_gradient_norm": float(np.mean(np.linalg.norm(gradients, axis=0))),
-                    "variance": float(np.var(gradients)),
-                    "gradient_runtime_s": row.get("gradient_runtime_s"),
-                }
-            )
+        components = load_gradient_components(row)
+        gradients = components["total"]
+        dt = float(row["dt"])
+        mu = float(row["mu"])
+        dx = float(row["dx"])
+        record = {
+            "full_label": row["full_label"],
+            "n": row.get("n"),
+            "l": row.get("l"),
+            "circuit": row.get("circuit"),
+            "initial_state": row.get("initial_state"),
+            "dt": dt,
+            "mu": mu,
+            "dx": dx,
+            "diffusion_number": mu * dt / dx**2,
+            "number_of_parameters": gradients.shape[0],
+            "gradient_sweeps": gradients.shape[1],
+            "gradient_num_samples": gradients.size,
+            "gradient_num_values_saved": 5 * gradients.size,
+            "gradient_tries_requested": row.get("gradient_tries"),
+            "gradient_runtime_s": row.get("gradient_runtime_s"),
+        }
+        _add_component_statistics(record, components, per_parameter=False)
+        records.append(record)
     columns = [
         "full_label",
         "n",
         "l",
         "circuit",
         "initial_state",
-        "dataset",
-        "diffusion_number",
         "dt",
+        "mu",
+        "dx",
+        "diffusion_number",
         "number_of_parameters",
         "gradient_sweeps",
         "gradient_num_samples",
+        "gradient_num_values_saved",
         "gradient_tries_requested",
         "mean_gradient",
         "mean_gradient_norm",
         "variance",
+        *_gradient_statistic_columns(),
         "gradient_runtime_s",
     ]
     return pd.DataFrame.from_records(records, columns=columns)
 
 
 def gradient_parameter_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
-    """Summarize each parameter's scalar gradient distribution separately."""
+    """Summarize all reconstructed gradient components for each parameter."""
     records = []
     for row in rows:
-        matrices = load_gradient_matrices(row)
+        components = load_gradient_components(row)
+        gradients = components["total"]
         labels = row.get("gradient_parameter_labels") or []
-        for dataset, gradients in matrices.items():
-            diffusion_number, dt = _gradient_dataset_metadata(row, dataset)
-            for parameter_index, samples in enumerate(gradients):
-                records.append(
-                    {
-                        "full_label": row["full_label"],
-                        "n": row.get("n"),
-                        "l": row.get("l"),
-                        "circuit": row.get("circuit"),
-                        "initial_state": row.get("initial_state"),
-                        "dataset": dataset,
-                        "diffusion_number": diffusion_number,
-                        "dt": dt,
-                        "number_of_parameters": gradients.shape[0],
-                        "parameter_index": parameter_index,
-                        "parameter": (
-                            labels[parameter_index]
-                            if parameter_index < len(labels)
-                            else f"theta_{parameter_index}"
-                        ),
-                        "gradient_sweeps": samples.size,
-                        "mean_gradient": float(np.mean(samples)),
-                        "mean_gradient_norm": float(np.mean(np.abs(samples))),
-                        "variance": float(np.var(samples)),
-                    }
-                )
+        dt = float(row["dt"])
+        mu = float(row["mu"])
+        dx = float(row["dx"])
+        for parameter_index in range(gradients.shape[0]):
+            parameter_components = {
+                name: values[parameter_index]
+                for name, values in components.items()
+            }
+            record = {
+                "full_label": row["full_label"],
+                "n": row.get("n"),
+                "l": row.get("l"),
+                "circuit": row.get("circuit"),
+                "initial_state": row.get("initial_state"),
+                "dt": dt,
+                "mu": mu,
+                "dx": dx,
+                "diffusion_number": mu * dt / dx**2,
+                "number_of_parameters": gradients.shape[0],
+                "parameter_index": parameter_index,
+                "parameter": (
+                    labels[parameter_index]
+                    if parameter_index < len(labels)
+                    else f"theta_{parameter_index}"
+                ),
+                "gradient_sweeps": gradients.shape[1],
+            }
+            _add_component_statistics(
+                record, parameter_components, per_parameter=True
+            )
+            records.append(record)
     columns = [
         "full_label",
         "n",
         "l",
         "circuit",
         "initial_state",
-        "dataset",
-        "diffusion_number",
         "dt",
+        "mu",
+        "dx",
+        "diffusion_number",
         "number_of_parameters",
         "parameter_index",
         "parameter",
@@ -1147,6 +1210,7 @@ def gradient_parameter_table(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
         "mean_gradient",
         "mean_gradient_norm",
         "variance",
+        *_gradient_statistic_columns(),
     ]
     return pd.DataFrame.from_records(records, columns=columns)
 
@@ -1157,7 +1221,6 @@ def filter_gradient_table(
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
     initial_states: Iterable[str] | str | None = None,
-    datasets: Iterable[str] | str | None = None,
 ) -> pd.DataFrame:
     """Filter a run-level or parameter-level gradient statistics table."""
     filtered = _as_table(table)
@@ -1166,7 +1229,6 @@ def filter_gradient_table(
         ("l", ls),
         ("circuit", circuits),
         ("initial_state", initial_states),
-        ("dataset", datasets),
     ):
         if selected is None:
             continue
@@ -1249,7 +1311,6 @@ def plot_gradient_run_table(
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
     initial_states: Iterable[str] | str | None = None,
-    datasets: Iterable[str] | str | None = None,
     group_by: str | Sequence[str] | None = None,
     kind: str = "line",
     log_x: bool = False,
@@ -1263,7 +1324,6 @@ def plot_gradient_run_table(
         ls=ls,
         circuits=circuits,
         initial_states=initial_states,
-        datasets=datasets,
     )
     return _plot_gradient_table(filtered, x, y, group_by, kind, log_x, log_y, ax)
 
@@ -1303,9 +1363,7 @@ def _select_gradient_parameters(
         raise ValueError("parameters must contain at least one index or 'mid'.")
 
     selected_groups = []
-    for (_full_label, _dataset), group in table.groupby(
-        ["full_label", "dataset"], dropna=False, sort=False
-    ):
+    for _full_label, group in table.groupby("full_label", dropna=False, sort=False):
         first = group.iloc[0]
         parameter_count = int(first["number_of_parameters"])
         for selector in selectors:
@@ -1347,7 +1405,6 @@ def plot_gradient_parameter_table(
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
     initial_states: Iterable[str] | str | None = None,
-    datasets: Iterable[str] | str | None = None,
     group_by: str | Sequence[str] | None = None,
     kind: str = "line",
     log_x: bool = False,
@@ -1365,7 +1422,6 @@ def plot_gradient_parameter_table(
         ls=ls,
         circuits=circuits,
         initial_states=initial_states,
-        datasets=datasets,
     )
     selected = _select_gradient_parameters(filtered, parameters)
     return _plot_gradient_table(selected, x, y, group_by, kind, log_x, log_y, ax)

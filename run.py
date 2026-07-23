@@ -34,7 +34,7 @@ def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
 
 
 def main() -> None:
-    run_mode = "grid"  # "single" | "pairs" | "grid"
+    run_mode = "single"  # "single" | "pairs" | "grid"
 
     # Common options applied to every run.
     common = dict(
@@ -49,11 +49,13 @@ def main() -> None:
         # Options: "positive_hump", "positive_periodic_wave",
         # "mixed_sine_modes", "tapered_gaussian", "tapered_tanh"
         expr_entcap_samples = 20000,
+        # gradient_tries = 5000,
+        dir_label = "exp2",
     )
 
     if run_mode == "single":
         cfg = build_sweep_cfg(
-            n=7,
+            n=8,
             l=1,
             # For single runs these are used verbatim. Remove either argument
             # to fall back to the automatic mode/circuit/initial-state-aware path.
@@ -72,7 +74,7 @@ def main() -> None:
         ]
         todo = pairs
     elif run_mode == "grid":
-        ns = [8,9]
+        ns = [2,3,4,5]
         ls = [1,2]
         todo = [(n, l) for n in ns for l in ls]
     else:
