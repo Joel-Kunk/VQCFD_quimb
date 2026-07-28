@@ -33,6 +33,13 @@ RUN_TABLE_COLUMNS = [
     "R2",
     "Fidelity",
     "MSE",
+    "RelativeL1Error",
+    "RelativeL2Error",
+    "RelativeLinfError",
+    "RelativeDerivativeL2Error",
+    "RelativeDerivativeLinfError",
+    "RelativeMassError",
+    "NormalizedMassDrift",
 ]
 
 
@@ -681,9 +688,51 @@ def quantum_field(run: RunData, timestep: int = -1) -> tuple[int, np.ndarray]:
     return index, np.asarray(field, dtype=float)
 
 
-def comparison_metrics(classical: np.ndarray, quantum: np.ndarray) -> dict[str, float]:
-    classical = np.asarray(classical).reshape(-1)
-    quantum = np.asarray(quantum).reshape(-1)
+def _relative_norm_error(
+    reference: np.ndarray,
+    approximation: np.ndarray,
+    order: int | float,
+) -> float:
+    denominator = float(np.linalg.norm(reference, ord=order))
+    if denominator <= np.finfo(float).eps:
+        return float("nan")
+    return float(np.linalg.norm(reference - approximation, ord=order) / denominator)
+
+
+def _periodic_centered_derivative(field: np.ndarray, dx: float) -> np.ndarray:
+    if dx <= 0:
+        raise ValueError("dx must be positive.")
+    values = np.asarray(field, dtype=float).reshape(-1)
+    if values.size < 3:
+        raise ValueError("At least three spatial samples are required for a derivative.")
+    return (np.roll(values, -1) - np.roll(values, 1)) / (2 * dx)
+
+
+def _discrete_mass(field: np.ndarray, dx: float) -> float:
+    return float(dx * np.sum(np.asarray(field, dtype=float)))
+
+
+def _relative_mass_difference(
+    reference: np.ndarray,
+    approximation: np.ndarray,
+    dx: float,
+) -> float:
+    reference_mass = _discrete_mass(reference, dx)
+    approximation_mass = _discrete_mass(approximation, dx)
+    reference_scale = float(dx * np.sum(np.abs(reference)))
+    zero_tolerance = 100 * np.finfo(float).eps * max(1.0, reference_scale)
+    if abs(reference_mass) <= zero_tolerance:
+        return float("nan")
+    return float(abs(approximation_mass - reference_mass) / abs(reference_mass))
+
+
+def comparison_metrics(
+    classical: np.ndarray,
+    quantum: np.ndarray,
+    dx: float = 1.0,
+) -> dict[str, float]:
+    classical = np.asarray(classical, dtype=float).reshape(-1)
+    quantum = np.asarray(quantum, dtype=float).reshape(-1)
     if classical.shape != quantum.shape:
         raise ValueError(f"Field shapes do not match: {classical.shape} != {quantum.shape}")
     residual = classical - quantum
@@ -692,7 +741,23 @@ def comparison_metrics(classical: np.ndarray, quantum: np.ndarray) -> dict[str, 
     r2 = float(1.0 - np.sum(np.abs(residual) ** 2) / total) if total > 0 else float("nan")
     norm_product = float(np.vdot(classical, classical).real * np.vdot(quantum, quantum).real)
     fidelity = float(np.abs(np.vdot(classical, quantum)) ** 2 / norm_product) if norm_product > 0 else float("nan")
-    return {"MSE": mse, "R2": r2, "Fidelity": fidelity}
+    classical_derivative = _periodic_centered_derivative(classical, dx)
+    quantum_derivative = _periodic_centered_derivative(quantum, dx)
+    return {
+        "MSE": mse,
+        "R2": r2,
+        "Fidelity": fidelity,
+        "RelativeL1Error": _relative_norm_error(classical, quantum, 1),
+        "RelativeL2Error": _relative_norm_error(classical, quantum, 2),
+        "RelativeLinfError": _relative_norm_error(classical, quantum, np.inf),
+        "RelativeDerivativeL2Error": _relative_norm_error(
+            classical_derivative, quantum_derivative, 2
+        ),
+        "RelativeDerivativeLinfError": _relative_norm_error(
+            classical_derivative, quantum_derivative, np.inf
+        ),
+        "RelativeMassError": _relative_mass_difference(classical, quantum, dx),
+    }
 
 
 def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
@@ -704,7 +769,15 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
             f"classical range is 0..{classical_fields.shape[1] - 1}."
         )
     classical = classical_fields[:, index]
-    metrics = comparison_metrics(classical, quantum)
+    dx = float(xs[1] - xs[0])
+    metrics = comparison_metrics(classical, quantum, dx=dx)
+    if index == 0:
+        quantum_initial = quantum
+    else:
+        _, quantum_initial = quantum_field(run, 0)
+    metrics["NormalizedMassDrift"] = _relative_mass_difference(
+        quantum_initial, quantum, dx
+    )
     return {
         "run": run,
         "timestep": index,
@@ -813,7 +886,21 @@ def build_run_records(
             candidates = n_l_variance.get((run.n, run.l), [])
             if variance is None and len(candidates) == 1:
                 variance = candidates[0]
-        metrics = {"R2": np.nan, "Fidelity": np.nan, "MSE": np.nan}
+        metrics = {
+            key: np.nan
+            for key in (
+                "R2",
+                "Fidelity",
+                "MSE",
+                "RelativeL1Error",
+                "RelativeL2Error",
+                "RelativeLinfError",
+                "RelativeDerivativeL2Error",
+                "RelativeDerivativeLinfError",
+                "RelativeMassError",
+                "NormalizedMassDrift",
+            )
+        }
         if run.params is not None:
             metrics.update({key: value for key, value in compare_run_timestep(run, -1).items() if key in metrics})
         records.append(
