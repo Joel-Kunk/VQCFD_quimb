@@ -308,7 +308,39 @@ def discover_simulation_runs(results_root: Path = RESULTS_ROOT) -> list[RunData]
     ]
 
 
-def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
+def _filter_run_rows(
+    rows: Sequence[Mapping[str, Any]],
+    ns: Iterable[int] | int | None = None,
+    ls: Iterable[int] | int | None = None,
+    circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
+    modes: Iterable[str] | str | None = None,
+) -> list[dict[str, Any]]:
+    """Filter discovered run metadata by any saved configuration fields."""
+    filtered = [dict(row) for row in rows]
+    for key, selected in (
+        ("n", ns),
+        ("l", ls),
+        ("circuit", circuits),
+        ("initial_state", initial_states),
+        ("mode", modes),
+    ):
+        if selected is None:
+            continue
+        allowed = {selected} if isinstance(selected, (str, int, np.integer)) else set(selected)
+        filtered = [row for row in filtered if row.get(key) in allowed]
+    return filtered
+
+
+def list_runs(
+    results_root: Path = RESULTS_ROOT,
+    ns: Iterable[int] | int | None = None,
+    ls: Iterable[int] | int | None = None,
+    circuits: Iterable[str] | str | None = None,
+    initial_states: Iterable[str] | str | None = None,
+    modes: Iterable[str] | str | None = None,
+) -> list[dict[str, Any]]:
+    """Discover saved runs, optionally filtering by their configuration."""
     rows = []
     for results_dir in sorted(Path(results_root).glob("results_*")):
         dir_label = results_dir.name.removeprefix("results_")
@@ -347,20 +379,47 @@ def list_runs(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
                     "path": str(data_dir),
                 }
             )
-    return rows
+    return _filter_run_rows(
+        rows,
+        ns=ns,
+        ls=ls,
+        circuits=circuits,
+        initial_states=initial_states,
+        modes=modes,
+    )
 
 
 def print_runs(runs: Sequence[Mapping[str, Any]] | None = None, limit: int = 200) -> None:
     runs = list_runs() if runs is None else runs
-    for row in runs[:limit]:
-        print(
-            f"{row['full_label']:<18} mode={str(row['mode']):<12} "
-            f"N={str(row['n']):<3} L={str(row['l']):<3} "
-            f"circuit={str(row.get('circuit')):<22} "
-            f"initial_state={str(row.get('initial_state')):<18} "
-            f"n_params={str(row.get('number_of_parameters')):<4} saved={row.get('has_params')} "
-            f"variance={row.get('has_variance')}"
-        )
+    table = pd.DataFrame.from_records(
+        [
+            {
+                "N": row.get("n"),
+                "L": row.get("l"),
+                "Circuit": row.get("circuit"),
+                "Initial state": row.get("initial_state"),
+                "Mode": row.get("mode"),
+                "Parameters": row.get("number_of_parameters"),
+                "Saved": row.get("has_params"),
+                "Variance": row.get("has_variance"),
+            }
+            for row in runs[:limit]
+        ],
+        columns=[
+            "N",
+            "L",
+            "Circuit",
+            "Initial state",
+            "Mode",
+            "Parameters",
+            "Saved",
+            "Variance",
+        ],
+    )
+    if table.empty:
+        print("No runs found.")
+    else:
+        print(table.to_string(index=False))
     print(f"count={len(runs)}")
 
 
@@ -673,7 +732,14 @@ def quantum_field(run: RunData, timestep: int = -1) -> tuple[int, np.ndarray]:
     if run.n is None or run.l is None:
         raise ValueError(f"Run {run.full_label} has incomplete N/L metadata.")
     index = _resolve_timestep(timestep, len(params))
-    state_params = np.asarray(params[index], dtype=float)
+    return index, _quantum_field_from_params(run, params[index])
+
+
+def _quantum_field_from_params(run: RunData, params: np.ndarray) -> np.ndarray:
+    """Reconstruct one real-space field from a saved parameter vector."""
+    if run.n is None or run.l is None:
+        raise ValueError(f"Run {run.full_label} has incomplete N/L metadata.")
+    state_params = np.asarray(params, dtype=float)
     state = np.asarray(
         fcq.make_state_circuit(
             run.n,
@@ -685,7 +751,19 @@ def quantum_field(run: RunData, timestep: int = -1) -> tuple[int, np.ndarray]:
     ).reshape(-1)
     n_total = int(run.metadata("n_total", 2**run.n))
     field = state_params[0] * np.real_if_close(state[:n_total]).real
-    return index, np.asarray(field, dtype=float)
+    return np.asarray(field, dtype=float)
+
+
+def quantum_evolution(run: RunData) -> tuple[np.ndarray, np.ndarray]:
+    """Reconstruct every saved quantum field and its physical time."""
+    params = run.params
+    if params is None:
+        raise FileNotFoundError(f"No parameter trajectory found for {run.full_label}.")
+    fields = np.column_stack(
+        [_quantum_field_from_params(run, state_params) for state_params in params]
+    )
+    times = np.arange(fields.shape[1], dtype=float) * float(run.metadata("dt"))
+    return times, fields
 
 
 def _relative_norm_error(
@@ -775,6 +853,9 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
         quantum_initial = quantum
     else:
         _, quantum_initial = quantum_field(run, 0)
+    metrics["InitialRelativeL2Error"] = _relative_norm_error(
+        classical_fields[:, 0], quantum_initial, 2
+    )
     metrics["NormalizedMassDrift"] = _relative_mass_difference(
         quantum_initial, quantum, dx
     )
@@ -792,20 +873,17 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
 def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
     comparison = compare_run_timestep(run, timestep)
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5))
+        _, ax = plt.subplots(figsize=(6, 4))
     ax.plot(comparison["x"], comparison["classical"], label="Classical", linewidth=2)
     ax.plot(comparison["x"], comparison["quantum"], "--", label="Quantum", linewidth=2)
-    ax.set_title(
-        f"{run.full_label}: timestep {comparison['timestep']} "
-        f"(t={comparison['time']:.4g})"
-    )
     ax.set_xlabel("Position")
     ax.set_ylabel("Field value")
+    ax.grid(False)
     ax.legend()
     metric_text = (
-        f"MSE = {comparison['MSE']:.4e}\n"
-        f"R² = {comparison['R2']:.6f}\n"
-        f"Fidelity = {comparison['Fidelity']:.6f}"
+        f"Initial rel L2 err = {comparison['InitialRelativeL2Error']:.2e}\n"
+        f"Rel L2 err = {comparison['RelativeL2Error']:.2e}\n"
+        f"Rel L∞ err = {comparison['RelativeLinfError']:.2e}"
     )
     ax.text(
         0.02,
@@ -815,7 +893,79 @@ def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
         va="bottom",
         bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
     )
-    return comparison, ax
+    return comparison, ax, _
+
+
+def plot_run_time_evolution(
+    run: RunData,
+    fields: str = "both",
+    timestep_stride: int = 1,
+    cmap: str = "viridis",
+    ax=None,
+):
+    """Plot all classical fields, quantum fields, or both on one set of axes."""
+    fields = str(fields).strip().lower()
+    if fields not in {"classical", "quantum", "both"}:
+        raise ValueError("fields must be 'classical', 'quantum', or 'both'.")
+    if not isinstance(timestep_stride, (int, np.integer)) or timestep_stride < 1:
+        raise ValueError("timestep_stride must be a positive integer.")
+
+    xs, classical = classical_reference(run)
+    dt = float(run.metadata("dt"))
+    classical_times = np.arange(classical.shape[1], dtype=float) * dt
+    quantum_times = quantum = None
+    if fields in {"quantum", "both"}:
+        quantum_times, quantum = quantum_evolution(run)
+
+    visible_times = []
+    if fields in {"classical", "both"}:
+        visible_times.append(classical_times)
+    if quantum_times is not None:
+        visible_times.append(quantum_times)
+    max_time = max(float(times[-1]) for times in visible_times if len(times))
+    norm = plt.Normalize(vmin=0.0, vmax=max_time if max_time > 0 else 1.0)
+    color_map = plt.get_cmap(cmap)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 7))
+    else:
+        fig = ax.figure
+
+    def plot_trajectory(values, times, linestyle, alpha):
+        for index in range(0, values.shape[1], int(timestep_stride)):
+            ax.plot(
+                xs,
+                values[:, index],
+                color=color_map(norm(times[index])),
+                linestyle=linestyle,
+                linewidth=1.2,
+                alpha=alpha,
+            )
+
+    if fields in {"classical", "both"}:
+        plot_trajectory(classical, classical_times, "-", 0.65)
+        ax.plot([], [], color="black", linestyle="-", label="Classical")
+    if fields in {"quantum", "both"}:
+        plot_trajectory(quantum, quantum_times, "--", 0.8)
+        ax.plot([], [], color="black", linestyle="--", label="Quantum")
+
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Field value")
+    ax.grid(False)
+    ax.legend()
+    colorbar = fig.colorbar(
+        plt.cm.ScalarMappable(norm=norm, cmap=color_map),
+        ax=ax,
+        label="Time",
+    )
+    evolution = {
+        "x": xs,
+        "classical_times": classical_times,
+        "classical": classical,
+        "quantum_times": quantum_times,
+        "quantum": quantum,
+    }
+    return evolution, ax, fig
 
 
 def _variance_gradient_samples(item: RunData | Mapping[str, Any]) -> np.ndarray | None:
@@ -1004,12 +1154,12 @@ def plot_run_table(
             ax.plot(group[x], group[y], marker="o", label=label)
     ax.set_xlabel(x)
     ax.set_ylabel(y)
-    ax.set_title(f"{y} vs {x}" + ("" if group_by is None else f" grouped by {group_by}"))
+    # ax.set_title(f"{y} vs {x}" + ("" if group_by is None else f" grouped by {group_by}"))
     if log_y:
         ax.set_yscale("log")
     if group_by is not None:
         ax.legend()
-    return filtered, ax
+    return filtered, ax, _
 
 
 def load_gradient_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:

@@ -76,7 +76,7 @@ def main() -> None:
         # `exp_only` always computes both metrics; this flag is for full runs.
         compute_expr_cap=False,
         # Use one name/None, or a list to sweep over multiple circuits.
-        unitary_circuit=[None,"uni2"], #[None,"uni2","brickwork_ring_ry","ring_ry_rz","ring_trainable_crx","multiscale_tree"],
+        unitary_circuit= None,#[None,"uni2","brickwork_ring_ry","ring_ry_rz","ring_trainable_crx","multiscale_tree"],
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree"
         # Example sweep: [None, "uni2", "multiscale_tree"]
@@ -111,8 +111,8 @@ def main() -> None:
             (5, 2),
         ]
     elif run_mode == "grid":
-        ns = [7]
-        ls = [1,2,4]
+        ns = [7,8,9]
+        ls = [4]
         base_todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")

@@ -42,8 +42,9 @@ def format_elapsed(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
 
 
-def ensure_dirs(cfg: SimConfig) -> None:
-    cfg.fig_dir.mkdir(parents=True, exist_ok=True)
+def ensure_dirs(cfg: SimConfig, create_figures: bool = True) -> None:
+    if create_figures:
+        cfg.fig_dir.mkdir(parents=True, exist_ok=True)
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -78,8 +79,8 @@ def save_manifest(cfg: SimConfig, manifest_path: Path | None = None) -> Path:
     return manifest_path
 
 
-def setup_outputs(cfg: SimConfig) -> None:
-    ensure_dirs(cfg)
+def setup_outputs(cfg: SimConfig, create_figures: bool = True) -> None:
+    ensure_dirs(cfg, create_figures=create_figures)
     save_manifest(cfg)
 
 
@@ -111,12 +112,13 @@ def compute_classical_reference(cfg: SimConfig) -> tuple[np.ndarray, np.ndarray,
     return xs, x_plot, t_plot, u, mod_init, psi_init
 
 
-def build_runtime(cfg: SimConfig) -> RuntimeContext:
+def build_runtime(cfg: SimConfig, plot_circuit: bool = True) -> RuntimeContext:
     if cfg.random_seed is not None:
         np.random.seed(cfg.random_seed)
 
     circuit_name = cfg.resolved_unitary_circuit
-    fpl.plot_unitary(cfg.n, cfg.l, cfg.fig_dir, circuit_name)
+    if plot_circuit:
+        fpl.plot_unitary(cfg.n, cfg.l, cfg.fig_dir, circuit_name)
     n_params = fcq.num_unitary_parameters(cfg.n, cfg.l, circuit_name)
     seed_params = (
         (np.random.random(n_params) * cfg.init_param_random_scale + cfg.init_param_random_center).tolist()
@@ -497,11 +499,11 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
             f"{cfg.number_of_parameters} parameters, so it cannot form one complete sweep."
         )
 
-    setup_outputs(cfg)
+    setup_outputs(cfg, create_figures=False)
     xs, _x_plot, _t_plot, _u, mod_init, psi_init = compute_classical_reference(cfg)
     dx = xs[1] - xs[0]
 
-    rt = build_runtime(cfg)
+    rt = build_runtime(cfg, plot_circuit=False)
     values = build_values(cfg)
     initial_params, initial_params_source, initial_params_fit_time = resolve_initial_params_with_fallback(
         cfg, rt, psi_init, mod_init
