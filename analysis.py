@@ -1113,17 +1113,19 @@ def filter_run_table(
 def plot_run_table(
     table: pd.DataFrame | Sequence[Mapping[str, Any]],
     x: str,
-    y: str,
+    y: str | Sequence[str],
     ns: Iterable[int] | int | None = None,
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
     initial_states: Iterable[str] | str | None = None,
-    group_by: str | None = None,
+    group_by: str | Sequence[str] | None = None,
     kind: str = "line",
     log_y: bool = False,
     ax=None,
+    x_label: str | None = None,
+    y_label: str | None = None,
 ):
-    """Plot any two table columns after filtering N, L, circuit, and initial state."""
+    """Plot one or more table columns after filtering and optional grouping."""
     filtered = filter_run_table(
         table,
         ns=ns,
@@ -1131,35 +1133,67 @@ def plot_run_table(
         circuits=circuits,
         initial_states=initial_states,
     )
-    for column in (x, y):
+    y_columns = [y] if isinstance(y, str) else list(y)
+    if not y_columns:
+        raise ValueError("y must contain at least one column.")
+    if any(not isinstance(column, str) for column in y_columns):
+        raise TypeError("Every y column must be a string.")
+    y_columns = list(dict.fromkeys(y_columns))
+    for column in (x, *y_columns):
         if column not in filtered.columns:
             raise KeyError(f"Unknown column {column!r}. Available columns: {list(filtered.columns)}")
-    if group_by is not None and group_by not in filtered.columns:
-        raise KeyError(f"Unknown group_by column {group_by!r}.")
-    filtered = filtered.dropna(subset=[x, y])
+    group_columns = (
+        [] if group_by is None
+        else [group_by] if isinstance(group_by, str)
+        else list(group_by)
+    )
+    missing_groups = [column for column in group_columns if column not in filtered.columns]
+    if missing_groups:
+        raise KeyError(f"Unknown group_by columns: {missing_groups}.")
+    filtered = (
+        filtered.dropna(subset=[x])
+        .dropna(subset=y_columns, how="all")
+        .reset_index(drop=True)
+    )
     if filtered.empty:
         raise ValueError("No rows remain after filtering and dropping missing x/y values.")
     if kind not in {"line", "scatter"}:
         raise ValueError("kind must be 'line' or 'scatter'")
     if ax is None:
-        _, ax = plt.subplots(figsize=(9, 5))
+        fig, ax = plt.subplots(figsize=(9, 5))
+    else:
+        fig = ax.figure
 
-    grouped = [(None, filtered)] if group_by is None else filtered.groupby(group_by, dropna=False, sort=True)
-    for group_value, group in grouped:
-        group = group.sort_values(x)
-        label = None if group_by is None else f"{group_by}={group_value}"
-        if kind == "scatter":
-            ax.scatter(group[x], group[y], label=label)
+    multiple_y = len(y_columns) > 1
+    for y_column in y_columns:
+        metric_table = filtered.dropna(subset=[y_column])
+        if group_columns:
+            group_key = group_columns[0] if len(group_columns) == 1 else group_columns
+            grouped = metric_table.groupby(group_key, dropna=False, sort=True)
         else:
-            ax.plot(group[x], group[y], marker="o", label=label)
-    ax.set_xlabel(x)
-    ax.set_ylabel(y)
-    # ax.set_title(f"{y} vs {x}" + ("" if group_by is None else f" grouped by {group_by}"))
+            grouped = [(None, metric_table)]
+        for group_value, group in grouped:
+            group = group.sort_values(x, kind="stable")
+            label_parts = [y_column] if multiple_y else []
+            if group_columns:
+                values = group_value if isinstance(group_value, tuple) else (group_value,)
+                label_parts.extend(
+                    f"{column}={value}"
+                    for column, value in zip(group_columns, values)
+                )
+            label = ", ".join(label_parts) or None
+            if kind == "scatter":
+                ax.scatter(group[x], group[y_column], label=label)
+            else:
+                ax.plot(group[x], group[y_column], marker="o", label=label)
+    ax.set_xlabel(x if x_label is None else x_label)
+    default_y_label = y_columns[0] if not multiple_y else "Value"
+    ax.set_ylabel(default_y_label if y_label is None else y_label)
     if log_y:
         ax.set_yscale("log")
-    if group_by is not None:
+    if group_columns or multiple_y:
         ax.legend()
-    return filtered, ax, _
+    return filtered, ax, fig
 
 
 def load_gradient_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:
@@ -1482,17 +1516,29 @@ def _gradient_group_columns(group_by: str | Sequence[str] | None) -> list[str]:
     return [group_by] if isinstance(group_by, str) else list(group_by)
 
 
+def _gradient_y_columns(y: str | Sequence[str]) -> list[str]:
+    columns = [y] if isinstance(y, str) else list(y)
+    if not columns:
+        raise ValueError("y must contain at least one column.")
+    if any(not isinstance(column, str) for column in columns):
+        raise TypeError("Every y column must be a string.")
+    return list(dict.fromkeys(columns))
+
+
 def _plot_gradient_table(
     table: pd.DataFrame,
     x: str,
-    y: str,
+    y: str | Sequence[str],
     group_by: str | Sequence[str] | None,
     kind: str,
     log_x: bool,
     log_y: bool,
     ax,
+    x_label: str | None = None,
+    y_label: str | None = None,
 ):
-    for column in (x, y):
+    y_columns = _gradient_y_columns(y)
+    for column in (x, *y_columns):
         if column not in table.columns:
             raise KeyError(f"Unknown column {column!r}. Available columns: {list(table.columns)}")
     group_columns = _gradient_group_columns(group_by)
@@ -1502,40 +1548,50 @@ def _plot_gradient_table(
     if kind not in {"line", "scatter"}:
         raise ValueError("kind must be 'line' or 'scatter'")
 
-    filtered = table.dropna(subset=[x, y]).reset_index(drop=True)
+    filtered = (
+        table.dropna(subset=[x])
+        .dropna(subset=y_columns, how="all")
+        .reset_index(drop=True)
+    )
     if filtered.empty:
         raise ValueError("No rows remain after filtering and dropping missing x/y values.")
     if ax is None:
         _, ax = plt.subplots(figsize=(9, 5))
 
-    if group_columns:
-        group_key = group_columns[0] if len(group_columns) == 1 else group_columns
-        grouped = filtered.groupby(group_key, dropna=False, sort=True)
-    else:
-        grouped = [(None, filtered)]
-    for group_value, group in grouped:
-        group = group.sort_values(x, kind="stable")
+    multiple_y = len(y_columns) > 1
+    for y_column in y_columns:
+        metric_table = filtered.dropna(subset=[y_column])
         if group_columns:
-            values = group_value if isinstance(group_value, tuple) else (group_value,)
-            label = ", ".join(
-                f"{column}={value}" for column, value in zip(group_columns, values)
-            )
+            group_key = group_columns[0] if len(group_columns) == 1 else group_columns
+            grouped = metric_table.groupby(group_key, dropna=False, sort=True)
         else:
-            label = None
-        if kind == "scatter":
-            ax.scatter(group[x], group[y], label=label)
-        else:
-            ax.plot(group[x], group[y], marker="o", label=label)
+            grouped = [(None, metric_table)]
+        for group_value, group in grouped:
+            group = group.sort_values(x, kind="stable")
+            label_parts = [y_column] if multiple_y else []
+            if group_columns:
+                values = group_value if isinstance(group_value, tuple) else (group_value,)
+                label_parts.extend(
+                    f"{column}={value}"
+                    for column, value in zip(group_columns, values)
+                )
+            label = ", ".join(label_parts) or None
+            if kind == "scatter":
+                ax.scatter(group[x], group[y_column], label=label)
+            else:
+                ax.plot(group[x], group[y_column], marker="o", label=label)
 
-    ax.set_xlabel(x)
-    ax.set_ylabel(y)
+    ax.set_xlabel(x if x_label is None else x_label)
+    default_y_label = y_columns[0] if not multiple_y else "Value"
+    ax.set_ylabel(default_y_label if y_label is None else y_label)
     grouping = "" if not group_columns else f" grouped by {', '.join(group_columns)}"
-    ax.set_title(f"{y} vs {x}{grouping}")
+    title_y = y_columns[0] if not multiple_y else "Gradient statistics"
+    ax.set_title(f"{title_y} vs {x}{grouping}")
     if log_x:
         ax.set_xscale("log")
     if log_y:
         ax.set_yscale("log")
-    if group_columns:
+    if group_columns or multiple_y:
         ax.legend()
     return filtered, ax
 
@@ -1543,7 +1599,7 @@ def _plot_gradient_table(
 def plot_gradient_run_table(
     table: pd.DataFrame | Sequence[Mapping[str, Any]],
     x: str,
-    y: str,
+    y: str | Sequence[str],
     ns: Iterable[int] | int | None = None,
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
@@ -1553,8 +1609,10 @@ def plot_gradient_run_table(
     log_x: bool = False,
     log_y: bool = False,
     ax=None,
+    x_label: str | None = None,
+    y_label: str | None = None,
 ):
-    """Plot any two overall-gradient columns with configurable filters and grouping."""
+    """Plot one or more overall-gradient columns with filters and grouping."""
     filtered = filter_gradient_table(
         table,
         ns=ns,
@@ -1562,7 +1620,18 @@ def plot_gradient_run_table(
         circuits=circuits,
         initial_states=initial_states,
     )
-    return _plot_gradient_table(filtered, x, y, group_by, kind, log_x, log_y, ax)
+    return _plot_gradient_table(
+        filtered,
+        x,
+        y,
+        group_by,
+        kind,
+        log_x,
+        log_y,
+        ax,
+        x_label=x_label,
+        y_label=y_label,
+    )
 
 
 def _middle_layer_parameter_index(row: Mapping[str, Any]) -> int:
@@ -1636,7 +1705,7 @@ def _select_gradient_parameters(
 def plot_gradient_parameter_table(
     table: pd.DataFrame | Sequence[Mapping[str, Any]],
     x: str,
-    y: str,
+    y: str | Sequence[str],
     parameters: Iterable[int | str] | int | str | None = None,
     ns: Iterable[int] | int | None = None,
     ls: Iterable[int] | int | None = None,
@@ -1647,8 +1716,10 @@ def plot_gradient_parameter_table(
     log_x: bool = False,
     log_y: bool = False,
     ax=None,
+    x_label: str | None = None,
+    y_label: str | None = None,
 ):
-    """Plot selected scalar-parameter gradient statistics.
+    """Plot one or more selected scalar-parameter gradient statistics.
 
     Parameter selectors can be non-negative indices, negative Python-style
     indices, or ``"mid"`` for the middle parameter of the middle repeated layer.
@@ -1661,7 +1732,18 @@ def plot_gradient_parameter_table(
         initial_states=initial_states,
     )
     selected = _select_gradient_parameters(filtered, parameters)
-    return _plot_gradient_table(selected, x, y, group_by, kind, log_x, log_y, ax)
+    return _plot_gradient_table(
+        selected,
+        x,
+        y,
+        group_by,
+        kind,
+        log_x,
+        log_y,
+        ax,
+        x_label=x_label,
+        y_label=y_label,
+    )
 
 
 def load_variance_run(dir_label: str, label: str, results_root: Path = RESULTS_ROOT) -> dict[str, Any]:
