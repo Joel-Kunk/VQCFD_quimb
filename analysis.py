@@ -26,6 +26,10 @@ RUN_TABLE_COLUMNS = [
     "L",
     "NumberOfParameters",
     "Var",
+    "OverallGradientVariance",
+    "OverlapGradientVariance",
+    "AdvectionGradientVariance",
+    "DiffusionGradientVariance",
     "Expressibility",
     "EntanglingCapability",
     "Circuit",
@@ -34,6 +38,9 @@ RUN_TABLE_COLUMNS = [
     "Fidelity",
     "MSE",
     "RelativeL1Error",
+    "InitialRelativeL2Error",
+    "PropagatedInitialRelativeL2Error",
+    "EvolutionRelativeL2Error",
     "RelativeL2Error",
     "RelativeLinfError",
     "RelativeDerivativeL2Error",
@@ -692,8 +699,11 @@ def plot_expr_entcap_vs_l(
     return fig, axes
 
 
-def classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
-    """Recreate the exact classical trajectory used by ``simulation_runner.py``."""
+def classical_evolution_from_initial_field(
+    run: RunData,
+    initial_field: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evolve one field with the classical update used by ``simulation_runner.py``."""
     if run.n is None:
         raise ValueError(f"Run {run.full_label} has no N metadata.")
     n_total = int(run.metadata("n_total", 2**run.n))
@@ -704,7 +714,13 @@ def classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
     xs = np.linspace(0, 1, n_total)
     dx = xs[1] - xs[0]
     fields = np.zeros((n_total, n_timesteps + 1), dtype=float)
-    fields[:, 0] = fist.make_initial_field(xs, run.initial_state)
+    initial = np.asarray(initial_field, dtype=float).reshape(-1)
+    if initial.size != n_total:
+        raise ValueError(
+            f"Initial field for {run.full_label} has {initial.size} samples; "
+            f"expected {n_total}."
+        )
+    fields[:, 0] = initial
     # Match the simulator's modular quantum shift operators.
     for timestep in range(n_timesteps):
         previous = fields[:, timestep]
@@ -716,6 +732,22 @@ def classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
             - (dt / (2 * dx)) * previous * (right - left)
         )
     return xs, fields
+
+
+def classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
+    """Recreate the target classical trajectory used by ``simulation_runner.py``."""
+    if run.n is None:
+        raise ValueError(f"Run {run.full_label} has no N metadata.")
+    n_total = int(run.metadata("n_total", 2**run.n))
+    xs = np.linspace(0, 1, n_total)
+    initial_field = fist.make_initial_field(xs, run.initial_state)
+    return classical_evolution_from_initial_field(run, initial_field)
+
+
+def encoded_initial_classical_reference(run: RunData) -> tuple[np.ndarray, np.ndarray]:
+    """Classically evolve the field represented by the run's initial parameters."""
+    _, initial_field = quantum_field(run, 0)
+    return classical_evolution_from_initial_field(run, initial_field)
 
 
 def _resolve_timestep(timestep: int, count: int) -> int:
@@ -853,8 +885,21 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
         quantum_initial = quantum
     else:
         _, quantum_initial = quantum_field(run, 0)
+    _, encoded_classical_fields = classical_evolution_from_initial_field(
+        run, quantum_initial
+    )
+    encoded_classical = encoded_classical_fields[:, index]
     metrics["InitialRelativeL2Error"] = _relative_norm_error(
         classical_fields[:, 0], quantum_initial, 2
+    )
+    metrics["PropagatedInitialRelativeL2Error"] = _relative_norm_error(
+        classical, encoded_classical, 2
+    )
+    target_norm = float(np.linalg.norm(classical, ord=2))
+    metrics["EvolutionRelativeL2Error"] = (
+        float(np.linalg.norm(quantum - encoded_classical, ord=2) / target_norm)
+        if target_norm > np.finfo(float).eps
+        else float("nan")
     )
     metrics["NormalizedMassDrift"] = _relative_mass_difference(
         quantum_initial, quantum, dx
@@ -865,6 +910,7 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
         "time": index * float(run.metadata("dt")),
         "x": xs,
         "classical": classical,
+        "encoded_classical": encoded_classical,
         "quantum": quantum,
         **metrics,
     }
@@ -873,17 +919,26 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
 def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
     comparison = compare_run_timestep(run, timestep)
     if ax is None:
-        _, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(comparison["x"], comparison["classical"], label="Classical", linewidth=2)
+        fig, ax = plt.subplots(figsize=(6, 4))
+    else:
+        fig = ax.figure
+    ax.plot(comparison["x"], comparison["classical"], label="Desired", linewidth=2)
+    ax.plot(
+        comparison["x"],
+        comparison["encoded_classical"],
+        color="0.45",
+        alpha=0.65,
+        label="Classical",
+        linewidth=2,
+    )
     ax.plot(comparison["x"], comparison["quantum"], "--", label="Quantum", linewidth=2)
     ax.set_xlabel("Position")
     ax.set_ylabel("Field value")
     ax.grid(False)
     ax.legend()
     metric_text = (
-        f"Initial rel L2 err = {comparison['InitialRelativeL2Error']:.2e}\n"
         f"Rel L2 err = {comparison['RelativeL2Error']:.2e}\n"
-        f"Rel L∞ err = {comparison['RelativeLinfError']:.2e}"
+        f"Evo rel L2 err = {comparison['EvolutionRelativeL2Error']:.2e}"
     )
     ax.text(
         0.02,
@@ -893,7 +948,7 @@ def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
         va="bottom",
         bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
     )
-    return comparison, ax, _
+    return comparison, ax, fig
 
 
 def plot_run_time_evolution(
@@ -1014,18 +1069,67 @@ def _variance_lookup(variance_runs: Iterable[RunData | Mapping[str, Any]] | None
     return exact, by_n_l
 
 
+RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS = {
+    "OverallGradientVariance": "total",
+    "OverlapGradientVariance": "contribution_1",
+    "DiffusionGradientVariance": "contribution_2",
+    "AdvectionGradientVariance": "contribution_3",
+}
+
+
+def _gradient_variance_lookup(
+    gradient_runs: Iterable[RunData | Mapping[str, Any]] | None,
+) -> dict[tuple[int, int, str, str], dict[str, float]]:
+    """Combine gradient samples and index their variances by run configuration."""
+    grouped: defaultdict[
+        tuple[int, int, str, str],
+        dict[str, list[np.ndarray]],
+    ] = defaultdict(lambda: defaultdict(list))
+    for item in gradient_runs or []:
+        row = (
+            load_gradient_run(item.dir_label, item.label, item.results_dir.parent)
+            if isinstance(item, RunData)
+            else item
+        )
+        n, l = row.get("n"), row.get("l")
+        if n is None or l is None:
+            continue
+        circuit = str(row.get("circuit", "default"))
+        initial_state = fist.resolve_initial_state(
+            row.get("initial_state", fist.DEFAULT_INITIAL_STATE)
+        )
+        components = load_gradient_components(row)
+        key = (int(n), int(l), circuit, initial_state)
+        for column, component in RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS.items():
+            grouped[key][column].append(
+                np.asarray(components[component], dtype=float).ravel()
+            )
+
+    return {
+        key: {
+            column: float(np.var(np.concatenate(component_samples[column])))
+            for column in RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS
+        }
+        for key, component_samples in grouped.items()
+    }
+
+
 def build_run_records(
     runs: Sequence[RunData],
     variance_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
     circuit_overrides: Mapping[str, str] | None = None,
+    gradient_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build per-run final-state metrics and metadata records.
 
     Separate variance-mode runs can be supplied through ``variance_runs``. They are
     matched by ``(N, L, Circuit)`` and then by ``(N, L)`` when unambiguous. Repeated
-    variance runs for the same configuration are averaged.
+    variance runs for the same configuration are averaged. Raw gradient runs are
+    matched exactly by ``(N, L, Circuit, InitialState)``; repeated matching runs
+    are combined at the sample level before their variances are calculated.
     """
     exact_variance, n_l_variance = _variance_lookup(variance_runs)
+    gradient_variances = _gradient_variance_lookup(gradient_runs)
     overrides = circuit_overrides or {}
     records = []
     for run in runs:
@@ -1036,6 +1140,9 @@ def build_run_records(
             candidates = n_l_variance.get((run.n, run.l), [])
             if variance is None and len(candidates) == 1:
                 variance = candidates[0]
+        matched_gradient_variances = gradient_variances.get(
+            (run.n, run.l, circuit, run.initial_state), {}
+        )
         metrics = {
             key: np.nan
             for key in (
@@ -1043,6 +1150,9 @@ def build_run_records(
                 "Fidelity",
                 "MSE",
                 "RelativeL1Error",
+                "InitialRelativeL2Error",
+                "PropagatedInitialRelativeL2Error",
+                "EvolutionRelativeL2Error",
                 "RelativeL2Error",
                 "RelativeLinfError",
                 "RelativeDerivativeL2Error",
@@ -1060,6 +1170,10 @@ def build_run_records(
                 "L": run.l,
                 "NumberOfParameters": run.number_of_parameters,
                 "Var": np.nan if variance is None else float(variance),
+                **{
+                    column: matched_gradient_variances.get(column, np.nan)
+                    for column in RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS
+                },
                 "Expressibility": _float_or_nan(run.metadata("expressibility")),
                 "EntanglingCapability": _float_or_nan(run.metadata("entangling_capability")),
                 "Circuit": circuit,
@@ -1078,9 +1192,15 @@ def build_run_table(
     runs: Sequence[RunData],
     variance_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
     circuit_overrides: Mapping[str, str] | None = None,
+    gradient_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
 ) -> pd.DataFrame:
     return pd.DataFrame(
-        build_run_records(runs, variance_runs, circuit_overrides),
+        build_run_records(
+            runs,
+            variance_runs=variance_runs,
+            circuit_overrides=circuit_overrides,
+            gradient_runs=gradient_runs,
+        ),
         columns=RUN_TABLE_COLUMNS,
     )
 
@@ -1124,8 +1244,10 @@ def plot_run_table(
     ax=None,
     x_label: str | None = None,
     y_label: str | None = None,
+    x_limits: tuple[float | None, float | None] | None = None,
+    y_limits: tuple[float | None, float | None] | None = None,
 ):
-    """Plot one or more table columns after filtering and optional grouping."""
+    """Plot table columns with optional filtering, grouping, and axis limits."""
     filtered = filter_run_table(
         table,
         ns=ns,
@@ -1191,6 +1313,10 @@ def plot_run_table(
     ax.set_ylabel(default_y_label if y_label is None else y_label)
     if log_y:
         ax.set_yscale("log")
+    if x_limits is not None:
+        ax.set_xlim(*x_limits)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
     if group_columns or multiple_y:
         ax.legend()
     return filtered, ax, fig
@@ -1586,14 +1712,14 @@ def _plot_gradient_table(
     ax.set_ylabel(default_y_label if y_label is None else y_label)
     grouping = "" if not group_columns else f" grouped by {', '.join(group_columns)}"
     title_y = y_columns[0] if not multiple_y else "Gradient statistics"
-    ax.set_title(f"{title_y} vs {x}{grouping}")
+    # ax.set_title(f"{title_y} vs {x}{grouping}")
     if log_x:
         ax.set_xscale("log")
     if log_y:
         ax.set_yscale("log")
     if group_columns or multiple_y:
         ax.legend()
-    return filtered, ax
+    return filtered, ax, _
 
 
 def plot_gradient_run_table(
