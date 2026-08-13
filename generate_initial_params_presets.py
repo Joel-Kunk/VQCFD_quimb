@@ -22,65 +22,24 @@ N_VALUES = tuple(range(2, 7))
 L_VALUES = tuple(range(1, 9))
 
 
-def _ring_edges(targets: list[int]) -> list[tuple[int, int]]:
-    edges = [(targets[i], targets[i + 1]) for i in range(0, len(targets) - 1, 2)]
-    edges.extend((targets[i], targets[i + 1]) for i in range(1, len(targets) - 1, 2))
-    if len(targets) > 2:
-        edges.append((targets[-1], targets[0]))
-    return edges
-
-
-def _tree_edges(targets: list[int]) -> list[tuple[int, int]]:
-    edges = []
-    distance = 1
-    while distance < len(targets):
-        for start in range(0, len(targets), 2 * distance):
-            target = start + distance
-            if target < len(targets):
-                edges.append((targets[start], targets[target]))
-        distance *= 2
-    return edges
-
-
 def _gate_operations(n: int, layers: int, circuit: str):
     targets = list(range(n - 1, -1, -1))
+    expected = fcq.num_unitary_parameters(n, layers, circuit)
+    specs = fcq._unitary_gate_specs(
+        None,
+        targets,
+        layers,
+        np.zeros(expected),
+        circuit,
+    )
     operations = []
     parameter_index = 0
-
-    def rotation(gate: str, target: int) -> None:
-        nonlocal parameter_index
-        operations.append((gate, (target,), parameter_index))
-        parameter_index += 1
-
-    def parameterized_two_qubit(gate: str, edge: tuple[int, int]) -> None:
-        nonlocal parameter_index
-        operations.append((gate, edge, parameter_index))
-        parameter_index += 1
-
-    for _ in range(layers):
-        for target in targets:
-            rotation("RY", target)
-            if circuit in {"uni2", "ring_ry_rz"}:
-                rotation("RZ", target)
-
-        if circuit in {"default", "uni2"}:
-            operations.extend(("CX", edge, None) for edge in zip(targets[:-1], targets[1:]))
-        elif circuit in {"brickwork_ring_ry", "ring_ry_rz"}:
-            operations.extend(("CX", edge, None) for edge in _ring_edges(targets))
-        elif circuit == "ring_trainable_crx":
-            for edge in _ring_edges(targets):
-                parameterized_two_qubit("CRX", edge)
-        elif circuit == "multiscale_tree":
-            operations.extend(("CX", edge, None) for edge in _tree_edges(targets))
+    for gate, qubits, fixed_parameter, trainable in specs:
+        if trainable:
+            operations.append((gate, qubits, parameter_index, None))
+            parameter_index += 1
         else:
-            raise ValueError(f"Unsupported circuit: {circuit}")
-
-    for target in targets:
-        rotation("RY", target)
-        if circuit in {"uni2", "ring_ry_rz"}:
-            rotation("RZ", target)
-
-    expected = fcq.num_unitary_parameters(n, layers, circuit)
+            operations.append((gate, qubits, None, fixed_parameter))
     if parameter_index != expected:
         raise RuntimeError(f"Built {parameter_index} parameters for {circuit}; expected {expected}.")
     return operations
@@ -128,6 +87,10 @@ def _gate_matrix(gate: str, theta: float | None = None):
             ],
             dtype=complex,
         )
+    if gate == "CRZ":
+        return np.diag(
+            [1, 1, np.exp(-0.5j * theta), np.exp(0.5j * theta)]
+        ).astype(complex)
     raise ValueError(f"Unsupported gate: {gate}")
 
 
@@ -154,13 +117,17 @@ def _gate_derivative(gate: str, theta: float):
             ],
             dtype=complex,
         )
+    if gate == "CRZ":
+        return np.diag(
+            [0, 0, -0.5j * np.exp(-0.5j * theta), 0.5j * np.exp(0.5j * theta)]
+        ).astype(complex)
     raise ValueError(f"Gate {gate} has no trainable derivative.")
 
 
 def _statevector(params, n: int, operations):
     state = np.concatenate((np.array([1.0 + 0.0j]), np.zeros(2**n - 1, dtype=complex)))
-    for gate, qubits, parameter_index in operations:
-        theta = None if parameter_index is None else params[parameter_index]
+    for gate, qubits, parameter_index, fixed_parameter in operations:
+        theta = fixed_parameter if parameter_index is None else params[parameter_index]
         matrix = _gate_matrix(gate, theta)
         state = _apply_gate(state, matrix, qubits, n)
     return state
@@ -179,8 +146,8 @@ def _loss_and_gradient(params, n: int, operations, desired):
         np.concatenate((np.array([1.0 + 0.0j]), np.zeros(2**n - 1, dtype=complex)))
     ]
     matrices = []
-    for gate, qubits, parameter_index in operations:
-        theta = None if parameter_index is None else params[parameter_index]
+    for gate, qubits, parameter_index, fixed_parameter in operations:
+        theta = fixed_parameter if parameter_index is None else params[parameter_index]
         matrix = _gate_matrix(gate, theta)
         matrices.append(matrix)
         states.append(_apply_gate(states[-1], matrix, qubits, n))
@@ -191,7 +158,7 @@ def _loss_and_gradient(params, n: int, operations, desired):
     gradient = np.zeros_like(params, dtype=float)
 
     for operation_index in range(len(operations) - 1, -1, -1):
-        gate, qubits, parameter_index = operations[operation_index]
+        gate, qubits, parameter_index, _fixed_parameter = operations[operation_index]
         if parameter_index is not None:
             derivative_state = _apply_gate(
                 states[operation_index],
@@ -355,13 +322,20 @@ def _write_checkpoint(path: Path, record) -> None:
     temporary.replace(path)
 
 
-def _all_jobs(tries: int, optimization_steps: int):
+def _all_jobs(
+    tries: int,
+    optimization_steps: int,
+    circuits=None,
+    initial_states=None,
+):
+    circuits = tuple(circuits or fcq.UNITARY_CIRCUITS)
+    initial_states = tuple(initial_states or fist.INITIAL_STATES)
     return [
         (n, layers, circuit, initial_state, tries, optimization_steps)
         for n in N_VALUES
         for layers in L_VALUES
-        for initial_state in fist.INITIAL_STATES
-        for circuit in fcq.UNITARY_CIRCUITS
+        for initial_state in initial_states
+        for circuit in circuits
     ]
 
 
@@ -370,7 +344,12 @@ def run_campaign(args) -> None:
     complete = set(_stored_preset_records(presets)) | set(
         _load_checkpoint_records(args.checkpoint_dir)
     )
-    all_jobs = _all_jobs(args.tries, args.optimization_steps)
+    all_jobs = _all_jobs(
+        args.tries,
+        args.optimization_steps,
+        args.circuits,
+        args.initial_states,
+    )
     sharded_jobs = all_jobs[args.shard_index :: args.shard_count]
     jobs = [
         job
@@ -379,9 +358,10 @@ def run_campaign(args) -> None:
     ]
     if args.max_jobs is not None:
         jobs = jobs[: args.max_jobs]
+    total_matrix = len(all_jobs)
     print(
         f"shard={args.shard_index + 1}/{args.shard_count} complete={len(complete)} "
-        f"pending_this_run={len(jobs)} total_matrix=1440",
+        f"pending_this_run={len(jobs)} total_matrix={total_matrix}",
         flush=True,
     )
     if not jobs:
@@ -402,27 +382,34 @@ def merge_presets(args) -> None:
     presets = _load_presets(args.presets)
     records = _stored_preset_records(presets)
     records.update(_load_checkpoint_records(args.checkpoint_dir))
-    expected = len(N_VALUES) * len(L_VALUES) * len(fist.INITIAL_STATES) * len(fcq.UNITARY_CIRCUITS)
-    if len(records) != expected:
-        raise RuntimeError(f"Cannot merge incomplete campaign: found {len(records)} of {expected} records.")
+    selected_jobs = _all_jobs(
+        args.tries,
+        args.optimization_steps,
+        args.circuits,
+        args.initial_states,
+    )
+    selected_keys = {(n, layers, circuit, initial_state) for n, layers, circuit, initial_state, *_ in selected_jobs}
+    missing = selected_keys.difference(records)
+    if missing:
+        example = sorted(missing)[:5]
+        raise RuntimeError(
+            f"Cannot merge incomplete selected campaign: missing {len(missing)} of "
+            f"{len(selected_keys)} records. Examples: {example}."
+        )
 
-    for n in N_VALUES:
+    for n, layers, circuit, initial_state, *_ in selected_jobs:
         by_l = presets.setdefault(n, {})
-        for layers in L_VALUES:
-            entry = by_l.setdefault(layers, {})
-            if entry.get("default") is not None and entry.get("default_mse") is None:
-                entry["default_mse"] = records[(n, layers, "default", "sine")]["mse"]
-            initial_states = entry.setdefault("initial_states", {})
-            for initial_state in fist.INITIAL_STATES:
-                state_records = initial_states.setdefault(initial_state, {})
-                for circuit in fcq.UNITARY_CIRCUITS:
-                    record = records[(n, layers, circuit, initial_state)]
-                    state_records[circuit] = {
-                        key: value
-                        for key, value in record.items()
-                        if key not in {"n", "l", "elapsed_seconds"}
-                    }
-                    state_records[circuit]["params"] = list(record["params"])
+        entry = by_l.setdefault(layers, {})
+        if entry.get("default") is not None and entry.get("default_mse") is None:
+            entry["default_mse"] = records[(n, layers, "default", "sine")]["mse"]
+        state_records = entry.setdefault("initial_states", {}).setdefault(initial_state, {})
+        record = records[(n, layers, circuit, initial_state)]
+        state_records[circuit] = {
+            key: value
+            for key, value in record.items()
+            if key not in {"n", "l", "elapsed_seconds"}
+        }
+        state_records[circuit]["params"] = list(record["params"])
 
     # Filling legacy gaps appends keys, so normalize the numeric ordering before
     # writing the expanded file.
@@ -435,7 +422,7 @@ def merge_presets(args) -> None:
     with temporary.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(presets, handle, sort_keys=False)
     temporary.replace(args.presets)
-    print(f"Merged {expected} records into {args.presets}.")
+    print(f"Merged {len(selected_keys)} selected records into {args.presets}.")
 
 
 def validate_dense_simulator() -> None:
@@ -465,58 +452,58 @@ def validate_presets(args) -> None:
     generated = 0
     legacy = 0
     checked = 0
-    for n in N_VALUES:
-        by_l = presets.get(n, presets.get(str(n), {}))
-        for layers in L_VALUES:
-            entry = by_l.get(layers, by_l.get(str(layers)))
-            if not isinstance(entry, dict):
-                raise AssertionError(f"Missing preset entry for N={n}, L={layers}.")
-            initial_states = entry.get("initial_states") or {}
-            for initial_state in fist.INITIAL_STATES:
-                circuits = initial_states.get(initial_state) or {}
-                for circuit in fcq.UNITARY_CIRCUITS:
-                    record = circuits.get(circuit)
-                    if not isinstance(record, dict):
-                        raise AssertionError(
-                            f"Missing preset for N={n}, L={layers}, circuit={circuit}, "
-                            f"initial_state={initial_state}."
-                        )
-                    expected_params = fcq.num_unitary_parameters(n, layers, circuit) + 1
-                    params = record.get("params")
-                    if not isinstance(params, list) or len(params) != expected_params:
-                        raise AssertionError(
-                            f"Invalid parameter count for N={n}, L={layers}, circuit={circuit}, "
-                            f"initial_state={initial_state}: expected {expected_params}."
-                        )
-                    mse = record.get("mse")
-                    if mse is None or not np.isfinite(float(mse)):
-                        raise AssertionError(
-                            f"Missing finite MSE for N={n}, L={layers}, circuit={circuit}, "
-                            f"initial_state={initial_state}."
-                        )
-                    if "tries" in record:
-                        generated += 1
-                        if record["tries"] != args.tries:
-                            raise AssertionError(
-                                f"Expected {args.tries} tries, got {record['tries']} for "
-                                f"N={n}, L={layers}, circuit={circuit}, "
-                                f"initial_state={initial_state}."
-                            )
-                        recomputed = _physical_mse(
-                            n, layers, circuit, initial_state, record["params"]
-                        )
-                        if not np.isclose(recomputed, float(mse), rtol=1e-9, atol=1e-13):
-                            raise AssertionError(
-                                f"Stored MSE mismatch for N={n}, L={layers}, circuit={circuit}, "
-                                f"initial_state={initial_state}: {mse} vs {recomputed}."
-                            )
-                    else:
-                        legacy += 1
-                    checked += 1
-
-    expected = len(N_VALUES) * len(L_VALUES) * len(fist.INITIAL_STATES) * len(
-        fcq.UNITARY_CIRCUITS
+    selected_jobs = _all_jobs(
+        args.tries,
+        args.optimization_steps,
+        args.circuits,
+        args.initial_states,
     )
+    for n, layers, circuit, initial_state, *_ in selected_jobs:
+        by_l = presets.get(n, presets.get(str(n), {}))
+        entry = by_l.get(layers, by_l.get(str(layers)))
+        if not isinstance(entry, dict):
+            raise AssertionError(f"Missing preset entry for N={n}, L={layers}.")
+        circuits = (entry.get("initial_states") or {}).get(initial_state) or {}
+        record = circuits.get(circuit)
+        if not isinstance(record, dict):
+            raise AssertionError(
+                f"Missing preset for N={n}, L={layers}, circuit={circuit}, "
+                f"initial_state={initial_state}."
+            )
+        expected_params = fcq.num_unitary_parameters(n, layers, circuit) + 1
+        params = record.get("params")
+        if not isinstance(params, list) or len(params) != expected_params:
+            raise AssertionError(
+                f"Invalid parameter count for N={n}, L={layers}, circuit={circuit}, "
+                f"initial_state={initial_state}: expected {expected_params}."
+            )
+        mse = record.get("mse")
+        if mse is None or not np.isfinite(float(mse)):
+            raise AssertionError(
+                f"Missing finite MSE for N={n}, L={layers}, circuit={circuit}, "
+                f"initial_state={initial_state}."
+            )
+        if "tries" in record:
+            generated += 1
+            if record["tries"] != args.tries:
+                raise AssertionError(
+                    f"Expected {args.tries} tries, got {record['tries']} for "
+                    f"N={n}, L={layers}, circuit={circuit}, "
+                    f"initial_state={initial_state}."
+                )
+            recomputed = _physical_mse(
+                n, layers, circuit, initial_state, record["params"]
+            )
+            if not np.isclose(recomputed, float(mse), rtol=1e-9, atol=1e-13):
+                raise AssertionError(
+                    f"Stored MSE mismatch for N={n}, L={layers}, circuit={circuit}, "
+                    f"initial_state={initial_state}: {mse} vs {recomputed}."
+                )
+        else:
+            legacy += 1
+        checked += 1
+
+    expected = len(selected_jobs)
     if checked != expected:
         raise AssertionError(f"Validated {checked} records; expected {expected}.")
     print(
@@ -532,6 +519,16 @@ def parse_args():
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--tries", type=int, default=20)
     parser.add_argument("--optimization-steps", type=int, default=1000)
+    parser.add_argument(
+        "--circuits",
+        nargs="+",
+        help="Restrict the campaign to these unitary-circuit names.",
+    )
+    parser.add_argument(
+        "--initial-states",
+        nargs="+",
+        help="Restrict the campaign to these initial-state names.",
+    )
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--max-jobs", type=int)
@@ -540,6 +537,13 @@ def parse_args():
         parser.error("--tries must be at least 1")
     if args.optimization_steps < 1:
         parser.error("--optimization-steps must be at least 1")
+    try:
+        if args.circuits:
+            args.circuits = tuple(dict.fromkeys(map(fcq.resolve_unitary_circuit, args.circuits)))
+        if args.initial_states:
+            args.initial_states = tuple(dict.fromkeys(map(fist.resolve_initial_state, args.initial_states)))
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.shard_count < 1:
         parser.error("--shard-count must be at least 1")
     if not 0 <= args.shard_index < args.shard_count:

@@ -10,6 +10,11 @@ UNITARY_CIRCUITS = (
     "ring_ry_rz",
     "ring_trainable_crx",
     "multiscale_tree",
+    "local_ry_rz",
+    "ghz_orbit",
+    "ring_trainable_crz",
+    "all_to_all_crx",
+    "block_crx",
 )
 
 
@@ -54,16 +59,71 @@ def _tree_edges(targets: list[int]) -> list[tuple[int, int]]:
     return edges
 
 
+def _all_to_all_edges(targets: list[int]) -> list[tuple[int, int]]:
+    return [
+        (targets[control], targets[target])
+        for control in range(len(targets))
+        for target in range(control + 1, len(targets))
+    ]
+
+
+def _block_distances(qubits: int) -> tuple[int, ...]:
+    """Cyclic interaction distances used successively by ``block_crx``."""
+    if qubits < 2:
+        return ()
+    largest = qubits // 2
+    distances = []
+    distance = 1
+    while distance <= largest:
+        distances.append(distance)
+        distance *= 2
+    if largest not in distances:
+        distances.append(largest)
+    return tuple(distances)
+
+
+def _cyclic_distance_edges(
+    targets: list[int],
+    distance: int,
+) -> list[tuple[int, int]]:
+    """Return unique cyclic edges at one separation, retaining orientation."""
+    edges = []
+    seen = set()
+    for index, control in enumerate(targets):
+        target = targets[(index + distance) % len(targets)]
+        undirected = frozenset((control, target))
+        if control != target and undirected not in seen:
+            edges.append((control, target))
+            seen.add(undirected)
+    return edges
+
+
+def _block_edges(targets: list[int], layer: int) -> list[tuple[int, int]]:
+    distances = _block_distances(len(targets))
+    if not distances:
+        return []
+    return _cyclic_distance_edges(targets, distances[layer % len(distances)])
+
+
 def num_unitary_parameters(
     qubits: int,
     layers: int,
     unitary_circuit: str | None = None,
 ) -> int:
     name = resolve_unitary_circuit(unitary_circuit)
-    if name in {"uni2", "ring_ry_rz"}:
+    if name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
         return 2 * qubits * (layers + 1)
-    if name == "ring_trainable_crx":
+    if name == "ghz_orbit":
+        return 2 * qubits * layers
+    if name in {"ring_trainable_crx", "ring_trainable_crz"}:
         return qubits * (layers + 1) + len(_ring_edges(list(range(qubits)))) * layers
+    if name == "all_to_all_crx":
+        return qubits * (layers + 1) + len(_all_to_all_edges(list(range(qubits)))) * layers
+    if name == "block_crx":
+        entangler_parameters = sum(
+            len(_block_edges(list(range(qubits)), layer)) for layer in range(layers)
+        )
+        return qubits * (layers + 1) + entangler_parameters
     return qubits * (layers + 1)
 
 
@@ -86,51 +146,86 @@ def _unitary_gate_specs(
 
     idx = 0
 
+    def add_fixed_gate(
+        gate: str,
+        qubits: tuple[int, ...],
+        parameter: float | None = None,
+    ) -> None:
+        specs.append((gate, qubits, parameter, False))
+
     def add_rotation(axis: str, target: int) -> None:
         nonlocal idx
         gate = f"CR{axis}" if control is not None else f"R{axis}"
         qubits = (control, target) if control is not None else (target,)
-        specs.append((gate, qubits, float(p[idx])))
+        specs.append((gate, qubits, float(p[idx]), True))
         idx += 1
 
     def add_parameterized_gate(gate: str, qubits: tuple[int, ...]) -> None:
         nonlocal idx
-        specs.append((gate, qubits, float(p[idx])))
+        specs.append((gate, qubits, float(p[idx]), True))
         idx += 1
 
-    for _ in range(layers):
-        if name in {"uni2", "ring_ry_rz"}:
+    if name == "ghz_orbit":
+        hub = targets_desc[0]
+        if control is None:
+            add_fixed_gate("RY", (hub,), np.pi / 2)
+            for target in targets_desc[1:]:
+                add_fixed_gate("CX", (hub, target))
+        else:
+            add_fixed_gate("CRY", (control, hub), np.pi / 2)
+            for target in targets_desc[1:]:
+                add_fixed_gate("CCX", (control, hub, target))
+
+        for _ in range(layers):
+            for target in targets_desc:
+                add_rotation("Y", target)
+                add_rotation("Z", target)
+    else:
+        for layer in range(layers):
+            if name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
+                for target in targets_desc:
+                    add_rotation("Y", target)
+                    add_rotation("Z", target)
+            else:
+                for target in targets_desc:
+                    add_rotation("Y", target)
+
+            if name == "default":
+                for edge in zip(targets_desc[:-1], targets_desc[1:]):
+                    add_fixed_gate("CX", edge)
+            elif name == "uni2":
+                for edge in zip(targets_desc[:-1], targets_desc[1:]):
+                    gate = "CX" if control is None else "CCX"
+                    qubits = edge if control is None else (control, *edge)
+                    add_fixed_gate(gate, qubits)
+            elif name in {"brickwork_ring_ry", "ring_ry_rz"}:
+                for edge in _ring_edges(targets_desc):
+                    add_fixed_gate("CX", edge)
+            elif name == "ring_trainable_crx":
+                for edge in _ring_edges(targets_desc):
+                    add_parameterized_gate("CRX", edge)
+            elif name == "ring_trainable_crz":
+                for edge in _ring_edges(targets_desc):
+                    add_parameterized_gate("CRZ", edge)
+            elif name == "multiscale_tree":
+                for edge in _tree_edges(targets_desc):
+                    add_fixed_gate("CX", edge)
+            elif name == "all_to_all_crx":
+                for edge in _all_to_all_edges(targets_desc):
+                    add_parameterized_gate("CRX", edge)
+            elif name == "block_crx":
+                for edge in _block_edges(targets_desc, layer):
+                    add_parameterized_gate("CRX", edge)
+            elif name != "local_ry_rz":
+                raise RuntimeError(f"Unhandled circuit family: {name!r}.")
+
+        if name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
             for target in targets_desc:
                 add_rotation("Y", target)
                 add_rotation("Z", target)
         else:
             for target in targets_desc:
                 add_rotation("Y", target)
-
-        if name == "default":
-            edges = list(zip(targets_desc[:-1], targets_desc[1:]))
-            specs.extend(("CX", edge, None) for edge in edges)
-        elif name == "uni2":
-            edges = list(zip(targets_desc[:-1], targets_desc[1:]))
-            if control is None:
-                specs.extend(("CX", edge, None) for edge in edges)
-            else:
-                specs.extend(("CCX", (control, *edge), None) for edge in edges)
-        elif name in {"brickwork_ring_ry", "ring_ry_rz"}:
-            specs.extend(("CX", edge, None) for edge in _ring_edges(targets_desc))
-        elif name == "ring_trainable_crx":
-            for edge in _ring_edges(targets_desc):
-                add_parameterized_gate("CRX", edge)
-        else:  # multiscale_tree
-            specs.extend(("CX", edge, None) for edge in _tree_edges(targets_desc))
-
-    if name in {"uni2", "ring_ry_rz"}:
-        for target in targets_desc:
-            add_rotation("Y", target)
-            add_rotation("Z", target)
-    else:
-        for target in targets_desc:
-            add_rotation("Y", target)
 
     if idx != expected:
         raise RuntimeError(f"Circuit {name!r} consumed {idx} parameters; expected {expected}.")
@@ -139,10 +234,15 @@ def _unitary_gate_specs(
 
 def _apply_specs(circ: qtn.Circuit, specs, inverse: bool = False, parametrize: bool = False) -> None:
     seq = reversed(specs) if inverse else specs
-    for gate, qubits, param in seq:
+    for gate, qubits, param, trainable in seq:
         if param is not None:
             theta = -param if inverse else param
-            circ.apply_gate(gate, qubits=qubits, params=(theta,), parametrize=parametrize)
+            circ.apply_gate(
+                gate,
+                qubits=qubits,
+                params=(theta,),
+                parametrize=parametrize and trainable,
+            )
         else:
             circ.apply_gate(gate, qubits=qubits)
 
