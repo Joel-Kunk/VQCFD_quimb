@@ -30,6 +30,11 @@ RUN_TABLE_COLUMNS = [
     "OverlapGradientVariance",
     "AdvectionGradientVariance",
     "DiffusionGradientVariance",
+    "Circuit1GradientVariance",
+    "Circuit2GradientVariance",
+    "Circuit3GradientVariance",
+    "Circuit4GradientVariance",
+    "Circuit5GradientVariance",
     "Expressibility",
     "EntanglingCapability",
     "Circuit",
@@ -1074,13 +1079,22 @@ RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS = {
     "OverlapGradientVariance": "contribution_1",
     "DiffusionGradientVariance": "contribution_2",
     "AdvectionGradientVariance": "contribution_3",
+    "Circuit1GradientVariance": "circuit_1",
+    "Circuit2GradientVariance": "circuit_2",
+    "Circuit3GradientVariance": "circuit_3",
+    "Circuit4GradientVariance": "circuit_4",
+    "Circuit5GradientVariance": "circuit_5",
 }
 
 
 def _gradient_variance_lookup(
     gradient_runs: Iterable[RunData | Mapping[str, Any]] | None,
 ) -> dict[tuple[int, int, str, str], dict[str, float]]:
-    """Combine gradient samples and index their variances by run configuration."""
+    """Index total, combined-term, and individual-circuit gradient variances.
+
+    Samples from repeated gradient runs with the same configuration are
+    concatenated before each variance is calculated.
+    """
     grouped: defaultdict[
         tuple[int, int, str, str],
         dict[str, list[np.ndarray]],
@@ -1114,11 +1128,95 @@ def _gradient_variance_lookup(
     }
 
 
+def _expression_metric_lookup(
+    expression_runs: Iterable[RunData | Mapping[str, Any]] | None,
+) -> dict[tuple[int, int, str], dict[str, float]]:
+    """Index independently saved expression metrics by circuit configuration.
+
+    Expressibility and entangling capability depend on the ansatz rather than
+    the simulation's initial state, so the lookup key is ``(N, L, Circuit)``.
+    If several independent metric runs share a key, their estimates are
+    averaged, weighted by ``expr_entcap_samples`` when every run records it.
+    """
+    grouped: defaultdict[
+        tuple[int, int, str],
+        list[tuple[float | None, float | None, int | None]],
+    ] = defaultdict(list)
+    for item in expression_runs or []:
+        if isinstance(item, RunData):
+            n, layers, circuit = item.n, item.l, item.circuit
+            expressibility = item.metadata("expressibility")
+            entangling_capability = item.metadata("entangling_capability")
+            samples = item.metadata("expr_entcap_samples")
+        else:
+            values = item.get("values") or {}
+            manifest = item.get("manifest") or {}
+            n = _first_present((item, ("n",)), (values, ("n",)), (manifest, ("n",)))
+            layers = _first_present((item, ("l",)), (values, ("l",)), (manifest, ("l",)))
+            circuit = _first_present(
+                (item, ("circuit", "resolved_unitary_circuit", "unitary_circuit")),
+                (values, ("resolved_unitary_circuit", "unitary_circuit", "circuit")),
+                (manifest, ("resolved_unitary_circuit", "unitary_circuit", "circuit")),
+                default=fcq.DEFAULT_UNITARY_CIRCUIT,
+            )
+            expressibility = _first_present(
+                (item, ("expressibility",)),
+                (values, ("expressibility",)),
+                (manifest, ("expressibility",)),
+            )
+            entangling_capability = _first_present(
+                (item, ("entangling_capability",)),
+                (values, ("entangling_capability",)),
+                (manifest, ("entangling_capability",)),
+            )
+            samples = _first_present(
+                (item, ("expr_entcap_samples",)),
+                (values, ("expr_entcap_samples",)),
+                (manifest, ("expr_entcap_samples",)),
+            )
+        if n is None or layers is None or circuit is None:
+            continue
+        if expressibility is None and entangling_capability is None:
+            continue
+        grouped[(int(n), int(layers), str(circuit))].append(
+            (
+                None if expressibility is None else float(expressibility),
+                None if entangling_capability is None else float(entangling_capability),
+                None if samples is None else int(samples),
+            )
+        )
+
+    lookup = {}
+    for key, estimates in grouped.items():
+        metrics = {}
+        for column, metric_index in (
+            ("Expressibility", 0),
+            ("EntanglingCapability", 1),
+        ):
+            available = [estimate for estimate in estimates if estimate[metric_index] is not None]
+            if not available:
+                continue
+            weights = [estimate[2] for estimate in available]
+            metrics[column] = float(
+                np.average(
+                    [estimate[metric_index] for estimate in available],
+                    weights=(
+                        weights
+                        if weights and all(weight is not None and weight > 0 for weight in weights)
+                        else None
+                    ),
+                )
+            )
+        lookup[key] = metrics
+    return lookup
+
+
 def build_run_records(
     runs: Sequence[RunData],
     variance_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
     circuit_overrides: Mapping[str, str] | None = None,
     gradient_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
+    expression_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build per-run final-state metrics and metadata records.
 
@@ -1127,9 +1225,12 @@ def build_run_records(
     variance runs for the same configuration are averaged. Raw gradient runs are
     matched exactly by ``(N, L, Circuit, InitialState)``; repeated matching runs
     are combined at the sample level before their variances are calculated.
+    Independently saved expression-only runs are matched by ``(N, L, Circuit)``
+    and take priority over metrics embedded in the simulation run.
     """
     exact_variance, n_l_variance = _variance_lookup(variance_runs)
     gradient_variances = _gradient_variance_lookup(gradient_runs)
+    expression_metrics = _expression_metric_lookup(expression_runs)
     overrides = circuit_overrides or {}
     records = []
     for run in runs:
@@ -1142,6 +1243,9 @@ def build_run_records(
                 variance = candidates[0]
         matched_gradient_variances = gradient_variances.get(
             (run.n, run.l, circuit, run.initial_state), {}
+        )
+        matched_expression_metrics = expression_metrics.get(
+            (run.n, run.l, circuit), {}
         )
         metrics = {
             key: np.nan
@@ -1174,8 +1278,14 @@ def build_run_records(
                     column: matched_gradient_variances.get(column, np.nan)
                     for column in RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS
                 },
-                "Expressibility": _float_or_nan(run.metadata("expressibility")),
-                "EntanglingCapability": _float_or_nan(run.metadata("entangling_capability")),
+                "Expressibility": matched_expression_metrics.get(
+                    "Expressibility",
+                    _float_or_nan(run.metadata("expressibility")),
+                ),
+                "EntanglingCapability": matched_expression_metrics.get(
+                    "EntanglingCapability",
+                    _float_or_nan(run.metadata("entangling_capability")),
+                ),
                 "Circuit": circuit,
                 "InitialState": run.initial_state,
                 **metrics,
@@ -1193,6 +1303,7 @@ def build_run_table(
     variance_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
     circuit_overrides: Mapping[str, str] | None = None,
     gradient_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
+    expression_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
 ) -> pd.DataFrame:
     return pd.DataFrame(
         build_run_records(
@@ -1200,6 +1311,7 @@ def build_run_table(
             variance_runs=variance_runs,
             circuit_overrides=circuit_overrides,
             gradient_runs=gradient_runs,
+            expression_runs=expression_runs,
         ),
         columns=RUN_TABLE_COLUMNS,
     )

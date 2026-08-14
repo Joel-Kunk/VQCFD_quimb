@@ -72,11 +72,11 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
+        mode="gradient",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
         # `exp_only` always computes both metrics; this flag is for full runs.
-        compute_expr_cap=False,
+        compute_expr_cap=True,
         # Use one name/None, or a list to sweep over multiple circuits.
-        unitary_circuit=["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
+        unitary_circuit= ["local_ry_rz"],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree", "local_ry_rz",
         # "ghz_orbit", "ring_trainable_crz", "all_to_all_crx", "block_crx"
@@ -112,8 +112,8 @@ def main() -> None:
             (5, 2),
         ]
     elif run_mode == "grid":
-        ns = [2,3,4]
-        ls = [4]
+        ns = [2,3,4,5,6]
+        ls = [2,4]
         base_todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")
