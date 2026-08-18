@@ -25,6 +25,12 @@ RUN_TABLE_COLUMNS = [
     "N",
     "L",
     "NumberOfParameters",
+    "OptimizationMode",
+    "OptimizationTimesteps",
+    "TotalOptimizationSteps",
+    "MeanOptimizationSteps",
+    "MedianOptimizationSteps",
+    "MaxOptimizationSteps",
     "Var",
     "OverallGradientVariance",
     "OverlapGradientVariance",
@@ -538,6 +544,45 @@ def load_per_timestep_histories(run: RunData, prefix: str) -> list[tuple[int, np
     return [(index, np.load(path, allow_pickle=True)) for index, path in entries]
 
 
+def optimization_step_counts(run: RunData) -> np.ndarray:
+    """Return the recoverable optimizer work count for each evolved timestep.
+
+    The saved ``cost_iter`` histories are the only optimizer-work measure
+    available for older runs. For the custom Adam modes, the first history
+    value is the cost before any update, so it is excluded. Quimb/SciPy and
+    COBYLA histories instead record loss-function evaluations; their exact
+    internal iteration counts were not persisted and cannot be reconstructed.
+    """
+    histories = load_per_timestep_histories(run, "cost_iter")
+    counts = np.asarray(
+        [np.asarray(values).size for _, values in histories],
+        dtype=int,
+    )
+    if run.mode in {"adam_exact", "adam_shots"}:
+        counts = np.maximum(counts - 1, 0)
+    return counts
+
+
+def optimization_step_summary(run: RunData) -> dict[str, float | int]:
+    """Summarize optimizer work across the evolved timesteps of one run."""
+    counts = optimization_step_counts(run)
+    if counts.size == 0:
+        return {
+            "OptimizationTimesteps": np.nan,
+            "TotalOptimizationSteps": np.nan,
+            "MeanOptimizationSteps": np.nan,
+            "MedianOptimizationSteps": np.nan,
+            "MaxOptimizationSteps": np.nan,
+        }
+    return {
+        "OptimizationTimesteps": int(counts.size),
+        "TotalOptimizationSteps": int(np.sum(counts)),
+        "MeanOptimizationSteps": float(np.mean(counts)),
+        "MedianOptimizationSteps": float(np.median(counts)),
+        "MaxOptimizationSteps": int(np.max(counts)),
+    }
+
+
 def normalize_cost_trace(trace: np.ndarray) -> np.ndarray:
     trace = np.asarray(trace, dtype=float).ravel()
     if trace.size == 0:
@@ -927,13 +972,13 @@ def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
         fig, ax = plt.subplots(figsize=(6, 4))
     else:
         fig = ax.figure
-    ax.plot(comparison["x"], comparison["classical"], label="Desired", linewidth=2)
+    ax.plot(comparison["x"], comparison["classical"], label="Target classical", linewidth=2)
     ax.plot(
         comparison["x"],
         comparison["encoded_classical"],
         color="0.45",
         alpha=0.65,
-        label="Classical",
+        label="Encoded-initial classical",
         linewidth=2,
     )
     ax.plot(comparison["x"], comparison["quantum"], "--", label="Quantum", linewidth=2)
@@ -942,8 +987,8 @@ def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
     ax.grid(False)
     ax.legend()
     metric_text = (
-        f"Rel L2 err = {comparison['RelativeL2Error']:.2e}\n"
-        f"Evo rel L2 err = {comparison['EvolutionRelativeL2Error']:.2e}"
+        f"Target L2 err = {comparison['RelativeL2Error']:.2e}\n"
+        f"Encoded L2 err = {comparison['EvolutionRelativeL2Error']:.2e}"
     )
     ax.text(
         0.02,
@@ -1026,6 +1071,217 @@ def plot_run_time_evolution(
         "quantum": quantum,
     }
     return evolution, ax, fig
+
+
+def evolution_error_diagnostics(run: RunData) -> pd.DataFrame:
+    """Calculate complementary trajectory errors at every saved timestep.
+
+    The total, evolution, and propagated-initial L2 errors share the target
+    classical field norm at each timestep. ``ErrorAlignmentCosine`` measures
+    whether the evolution and propagated-initial error vectors reinforce
+    (positive) or cancel (negative) one another.
+    """
+    xs, classical = classical_reference(run)
+    times, quantum = quantum_evolution(run)
+    _, encoded_classical = encoded_initial_classical_reference(run)
+
+    if classical.shape != encoded_classical.shape:
+        raise ValueError(
+            "Target and encoded-initial classical trajectories have different "
+            f"shapes: {classical.shape} != {encoded_classical.shape}."
+        )
+    if quantum.shape[0] != classical.shape[0]:
+        raise ValueError(
+            "Classical and quantum trajectories have different spatial sizes: "
+            f"{classical.shape[0]} != {quantum.shape[0]}."
+        )
+    if quantum.shape[1] > classical.shape[1]:
+        raise ValueError(
+            "The quantum trajectory contains more timesteps than the classical "
+            f"reference: {quantum.shape[1]} > {classical.shape[1]}."
+        )
+
+    dx = float(xs[1] - xs[0])
+    records = []
+    for index, time in enumerate(times):
+        target = classical[:, index]
+        encoded = encoded_classical[:, index]
+        approximation = quantum[:, index]
+        target_norm = float(np.linalg.norm(target, ord=2))
+
+        propagated_residual = encoded - target
+        evolution_residual = approximation - encoded
+        total_residual = approximation - target
+        residual_norm_product = float(
+            np.linalg.norm(propagated_residual, ord=2)
+            * np.linalg.norm(evolution_residual, ord=2)
+        )
+        alignment = (
+            float(np.dot(propagated_residual, evolution_residual) / residual_norm_product)
+            if residual_norm_product > 0
+            else float("nan")
+        )
+        field_metrics = comparison_metrics(target, approximation, dx=dx)
+        records.append(
+            {
+                "Timestep": index,
+                "Time": float(time),
+                "RelativeL2Error": (
+                    float(np.linalg.norm(total_residual, ord=2) / target_norm)
+                    if target_norm > np.finfo(float).eps
+                    else float("nan")
+                ),
+                "EvolutionRelativeL2Error": (
+                    float(np.linalg.norm(evolution_residual, ord=2) / target_norm)
+                    if target_norm > np.finfo(float).eps
+                    else float("nan")
+                ),
+                "PropagatedInitialRelativeL2Error": (
+                    float(np.linalg.norm(propagated_residual, ord=2) / target_norm)
+                    if target_norm > np.finfo(float).eps
+                    else float("nan")
+                ),
+                "RelativeDerivativeL2Error": field_metrics[
+                    "RelativeDerivativeL2Error"
+                ],
+                "RelativeLinfError": field_metrics["RelativeLinfError"],
+                "ErrorAlignmentCosine": alignment,
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def plot_evolution_error_diagnostics(
+    run: RunData,
+    log_error_y: bool = True,
+    axes=None,
+):
+    """Plot trajectory-level error magnitudes and their vector alignment."""
+    diagnostics = evolution_error_diagnostics(run)
+    if axes is None:
+        fig, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+    else:
+        axes = np.asarray(axes, dtype=object).reshape(-1)
+        if axes.size != 3:
+            raise ValueError("axes must contain exactly three Matplotlib axes.")
+        fig = axes[0].figure
+
+    time = diagnostics["Time"]
+
+    def error_values(column: str) -> np.ndarray:
+        values = diagnostics[column].to_numpy(dtype=float, copy=True)
+        if log_error_y:
+            values[values <= 0] = np.nan
+        return values
+
+    axes[0].plot(
+        time,
+        error_values("RelativeL2Error"),
+        marker="o",
+        markersize=3,
+        label="Total L2",
+    )
+    axes[0].plot(
+        time,
+        error_values("EvolutionRelativeL2Error"),
+        marker="o",
+        markersize=3,
+        label="Evolution L2",
+    )
+    axes[0].plot(
+        time,
+        error_values("PropagatedInitialRelativeL2Error"),
+        marker="o",
+        markersize=3,
+        label="Propagated initial L2",
+    )
+    axes[0].set_ylabel("Relative error")
+    axes[0].set_title(f"L2 error decomposition: {run.full_label}")
+    axes[0].legend()
+
+    axes[1].plot(
+        time,
+        error_values("RelativeDerivativeL2Error"),
+        marker="o",
+        markersize=3,
+        label="Derivative L2",
+    )
+    axes[1].plot(
+        time,
+        error_values("RelativeLinfError"),
+        marker="o",
+        markersize=3,
+        label="L-infinity",
+    )
+    axes[1].set_ylabel("Relative error")
+    axes[1].set_title("Shape and maximum-point errors")
+    axes[1].legend()
+
+    if log_error_y:
+        axes[0].set_yscale("log")
+        axes[1].set_yscale("log")
+
+    axes[2].plot(
+        time,
+        diagnostics["ErrorAlignmentCosine"],
+        marker="o",
+        markersize=3,
+        color="tab:purple",
+    )
+    axes[2].axhline(0.0, color="0.35", linewidth=1)
+    axes[2].set_ylim(-1.05, 1.05)
+    axes[2].set_xlabel("Time")
+    axes[2].set_ylabel(r"$\cos(\theta)$")
+    axes[2].set_title("Error alignment: negative values indicate cancellation")
+    fig.tight_layout()
+    return diagnostics, axes, fig
+
+
+def plot_final_error_diagnostics(
+    run: RunData,
+    timestep: int = -1,
+    axes=None,
+):
+    """Plot the three reference fields and their signed residuals."""
+    comparison = compare_run_timestep(run, timestep=timestep)
+    if axes is None:
+        fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    else:
+        axes = np.asarray(axes, dtype=object).reshape(-1)
+        if axes.size != 2:
+            raise ValueError("axes must contain exactly two Matplotlib axes.")
+        fig = axes[0].figure
+
+    x = comparison["x"]
+    target = comparison["classical"]
+    encoded = comparison["encoded_classical"]
+    quantum = comparison["quantum"]
+    axes[0].plot(x, target, linewidth=2, label="Target classical")
+    axes[0].plot(
+        x,
+        encoded,
+        linewidth=2,
+        color="0.45",
+        label="Encoded-initial classical",
+    )
+    axes[0].plot(x, quantum, "--", linewidth=2, label="Quantum")
+    axes[0].set_ylabel("Field value")
+    axes[0].set_title(
+        f"Field comparison: {run.full_label}, "
+        f"t = {comparison['time']:.3g}"
+    )
+    axes[0].legend()
+
+    axes[1].plot(x, quantum - target, label="Total: quantum - target")
+    axes[1].plot(x, quantum - encoded, label="Evolution: quantum - encoded")
+    axes[1].plot(x, encoded - target, label="Propagated initial: encoded - target")
+    axes[1].axhline(0.0, color="0.35", linewidth=1)
+    axes[1].set_xlabel("Position")
+    axes[1].set_ylabel("Signed residual")
+    axes[1].set_title("Residual fields")
+    axes[1].legend()
+    fig.tight_layout()
+    return comparison, axes, fig
 
 
 def _variance_gradient_samples(item: RunData | Mapping[str, Any]) -> np.ndarray | None:
@@ -1247,6 +1503,7 @@ def build_run_records(
         matched_expression_metrics = expression_metrics.get(
             (run.n, run.l, circuit), {}
         )
+        optimization_summary = optimization_step_summary(run)
         metrics = {
             key: np.nan
             for key in (
@@ -1273,6 +1530,8 @@ def build_run_records(
                 "N": run.n,
                 "L": run.l,
                 "NumberOfParameters": run.number_of_parameters,
+                "OptimizationMode": run.mode,
+                **optimization_summary,
                 "Var": np.nan if variance is None else float(variance),
                 **{
                     column: matched_gradient_variances.get(column, np.nan)
@@ -1327,17 +1586,42 @@ def filter_run_table(
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
     initial_states: Iterable[str] | str | None = None,
+    filters: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
+    """Filter a run table by any column.
+
+    The named selectors are retained for backward compatibility. ``filters``
+    accepts arbitrary table columns, with either one allowed value or an
+    iterable of allowed values for each column. All supplied filters are
+    combined with logical AND.
+    """
     filtered = _as_table(table)
-    for column, selected in (
+    selections = [
         ("N", ns),
         ("L", ls),
         ("Circuit", circuits),
         ("InitialState", initial_states),
-    ):
+    ]
+    if filters is not None:
+        if not isinstance(filters, Mapping):
+            raise TypeError("filters must be a mapping from column names to allowed values.")
+        selections.extend(filters.items())
+
+    for column, selected in selections:
         if selected is None:
             continue
-        allowed = {selected} if isinstance(selected, (str, int, np.integer)) else set(selected)
+        if column not in filtered.columns:
+            raise KeyError(
+                f"Unknown filter column {column!r}. "
+                f"Available columns: {list(filtered.columns)}"
+            )
+        if isinstance(selected, (str, bytes)) or np.isscalar(selected):
+            allowed = [selected]
+        else:
+            try:
+                allowed = list(selected)
+            except TypeError:
+                allowed = [selected]
         filtered = filtered[filtered[column].isin(allowed)]
     return filtered.reset_index(drop=True)
 
@@ -1358,14 +1642,22 @@ def plot_run_table(
     y_label: str | None = None,
     x_limits: tuple[float | None, float | None] | None = None,
     y_limits: tuple[float | None, float | None] | None = None,
+    filters: Mapping[str, Any] | None = None,
+    series_labels: str | Sequence[str] | None = None,
 ):
-    """Plot table columns with optional filtering, grouping, and axis limits."""
+    """Plot table columns with configurable filters, labels, and grouping.
+
+    ``filters`` can select values from any table column. ``series_labels`` can
+    replace the complete legend label of every plotted series; its order is all
+    groups for the first y column, followed by all groups for the next y column.
+    """
     filtered = filter_run_table(
         table,
         ns=ns,
         ls=ls,
         circuits=circuits,
         initial_states=initial_states,
+        filters=filters,
     )
     y_columns = [y] if isinstance(y, str) else list(y)
     if not y_columns:
@@ -1399,6 +1691,7 @@ def plot_run_table(
         fig = ax.figure
 
     multiple_y = len(y_columns) > 1
+    series_specs = []
     for y_column in y_columns:
         metric_table = filtered.dropna(subset=[y_column])
         if group_columns:
@@ -1408,6 +1701,34 @@ def plot_run_table(
             grouped = [(None, metric_table)]
         for group_value, group in grouped:
             group = group.sort_values(x, kind="stable")
+            series_specs.append((y_column, group_value, group))
+
+    if series_labels is None:
+        custom_series_labels = None
+    elif isinstance(series_labels, str):
+        if len(series_specs) != 1:
+            raise ValueError(
+                "A single series label can only be used when exactly one "
+                f"series is plotted ({len(series_specs)} found)."
+            )
+        custom_series_labels = [series_labels]
+    else:
+        try:
+            custom_series_labels = [str(label) for label in series_labels]
+        except TypeError as exc:
+            raise TypeError(
+                "series_labels must be None, a string, or a sequence of strings."
+            ) from exc
+        if len(custom_series_labels) != len(series_specs):
+            raise ValueError(
+                "series_labels must have one entry for each plotted series "
+                f"({len(series_specs)} expected, {len(custom_series_labels)} received)."
+            )
+
+    for series_index, (y_column, group_value, group) in enumerate(series_specs):
+        if custom_series_labels is not None:
+            label = custom_series_labels[series_index]
+        else:
             label_parts = [y_column] if multiple_y else []
             if group_columns:
                 values = group_value if isinstance(group_value, tuple) else (group_value,)
@@ -1416,10 +1737,10 @@ def plot_run_table(
                     for column, value in zip(group_columns, values)
                 )
             label = ", ".join(label_parts) or None
-            if kind == "scatter":
-                ax.scatter(group[x], group[y_column], label=label)
-            else:
-                ax.plot(group[x], group[y_column], marker="o", label=label)
+        if kind == "scatter":
+            ax.scatter(group[x], group[y_column], label=label)
+        else:
+            ax.plot(group[x], group[y_column], marker="o", label=label)
     ax.set_xlabel(x if x_label is None else x_label)
     default_y_label = y_columns[0] if not multiple_y else "Value"
     ax.set_ylabel(default_y_label if y_label is None else y_label)
@@ -1429,7 +1750,7 @@ def plot_run_table(
         ax.set_xlim(*x_limits)
     if y_limits is not None:
         ax.set_ylim(*y_limits)
-    if group_columns or multiple_y:
+    if custom_series_labels is not None or group_columns or multiple_y:
         ax.legend()
     return filtered, ax, fig
 
