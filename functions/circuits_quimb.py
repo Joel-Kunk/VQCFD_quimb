@@ -15,6 +15,8 @@ UNITARY_CIRCUITS = (
     "ring_trainable_crz",
     "all_to_all_crx",
     "block_crx",
+    "mps_staircase",
+    "mps_staircase_light",
 )
 
 
@@ -124,6 +126,14 @@ def num_unitary_parameters(
             len(_block_edges(list(range(qubits)), layer)) for layer in range(layers)
         )
         return qubits * (layers + 1) + entangler_parameters
+    if name == "mps_staircase":
+        # Each matrix-product-disentangler (MPD) layer contains one general
+        # SU(4) block per nearest-neighbour bond and one boundary SU(2) block.
+        return layers * (15 * max(0, qubits - 1) + 3)
+    if name == "mps_staircase_light":
+        # Real-amplitude MPD: six RY angles per two-qubit block and one RY
+        # angle for the one-qubit boundary tensor in each layer.
+        return layers * (6 * max(0, qubits - 1) + 1)
     return qubits * (layers + 1)
 
 
@@ -165,7 +175,68 @@ def _unitary_gate_specs(
         specs.append((gate, qubits, float(p[idx]), True))
         idx += 1
 
-    if name == "ghz_orbit":
+    def add_euler_block(target: int) -> None:
+        """Add a general one-qubit unitary, up to global phase."""
+        add_rotation("Z", target)
+        add_rotation("Y", target)
+        add_rotation("Z", target)
+
+    def add_cx(inner_control: int, inner_target: int) -> None:
+        """Add a fixed, data-only CX.
+
+        In the Burgers Hadamard tests the inactive ancilla branch enters the
+        state-preparation block with all data qubits in |0>. The fixed CNOT
+        network therefore acts trivially on that branch and need not be
+        promoted to Toffoli gates; only parametrized rotations are controlled.
+        """
+        add_fixed_gate("CX", (inner_control, inner_target))
+
+    def add_su4_block(first: int, second: int) -> None:
+        """Add a 15-parameter general SU(4) block.
+
+        This is the three-CNOT construction used by Quimb's native ``SU4``
+        gate, expanded into one-parameter rotations so that reversing the
+        specification and negating its angles constructs the exact inverse.
+        The expansion also lets an outer ancilla control each trainable
+        rotation while the fixed CNOT skeleton remains data-only.
+        """
+        add_euler_block(first)
+        add_euler_block(second)
+        add_cx(second, first)
+        add_rotation("Z", first)
+        add_rotation("Y", second)
+        add_cx(first, second)
+        add_rotation("Y", second)
+        add_cx(second, first)
+        add_euler_block(first)
+        add_euler_block(second)
+
+    def add_light_mps_block(first: int, second: int) -> None:
+        """Add a six-parameter, real-amplitude two-qubit MPS block."""
+        add_rotation("Y", first)
+        add_rotation("Y", second)
+        add_cx(second, first)
+        add_rotation("Y", second)
+        add_cx(first, second)
+        add_rotation("Y", second)
+        add_cx(second, first)
+        add_rotation("Y", first)
+        add_rotation("Y", second)
+
+    if name in {"mps_staircase", "mps_staircase_light"}:
+        for _ in range(layers):
+            for first, second in zip(targets_desc[:-1], targets_desc[1:]):
+                if name == "mps_staircase":
+                    add_su4_block(first, second)
+                else:
+                    add_light_mps_block(first, second)
+            # This is the one-site boundary tensor G[N] in Fig. 1 of
+            # arXiv:1908.07958. Keeping it explicit mirrors the MPD exactly.
+            if name == "mps_staircase":
+                add_euler_block(targets_desc[-1])
+            else:
+                add_rotation("Y", targets_desc[-1])
+    elif name == "ghz_orbit":
         hub = targets_desc[0]
         if control is None:
             add_fixed_gate("RY", (hub,), np.pi / 2)
@@ -195,9 +266,7 @@ def _unitary_gate_specs(
                     add_fixed_gate("CX", edge)
             elif name == "uni2":
                 for edge in zip(targets_desc[:-1], targets_desc[1:]):
-                    gate = "CX" if control is None else "CCX"
-                    qubits = edge if control is None else (control, *edge)
-                    add_fixed_gate(gate, qubits)
+                    add_fixed_gate("CX", edge)
             elif name in {"brickwork_ring_ry", "ring_ry_rz"}:
                 for edge in _ring_edges(targets_desc):
                     add_fixed_gate("CX", edge)

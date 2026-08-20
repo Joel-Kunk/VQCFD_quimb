@@ -79,7 +79,8 @@ def main() -> None:
         unitary_circuit= [None],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree", "local_ry_rz",
-        # "ghz_orbit", "ring_trainable_crz", "all_to_all_crx", "block_crx"
+        # "ghz_orbit", "ring_trainable_crz", "all_to_all_crx", "block_crx",
+        # "mps_staircase", "mps_staircase_light"
         # Example sweep: [None, "uni2", "multiscale_tree"]
         # Use one name/None, or a list to sweep over multiple initial states.
         initial_state=None,#["positive_periodic_wave","mixed_sine_modes","tapered_gaussian"],
