@@ -327,13 +327,17 @@ def _all_jobs(
     optimization_steps: int,
     circuits=None,
     initial_states=None,
+    n_values=None,
+    l_values=None,
 ):
     circuits = tuple(circuits or fcq.UNITARY_CIRCUITS)
     initial_states = tuple(initial_states or fist.INITIAL_STATES)
+    n_values = tuple(n_values or N_VALUES)
+    l_values = tuple(l_values or L_VALUES)
     return [
         (n, layers, circuit, initial_state, tries, optimization_steps)
-        for n in N_VALUES
-        for layers in L_VALUES
+        for n in n_values
+        for layers in l_values
         for initial_state in initial_states
         for circuit in circuits
     ]
@@ -349,6 +353,8 @@ def run_campaign(args) -> None:
         args.optimization_steps,
         args.circuits,
         args.initial_states,
+        args.n_values,
+        args.l_values,
     )
     sharded_jobs = all_jobs[args.shard_index :: args.shard_count]
     jobs = [
@@ -387,6 +393,8 @@ def merge_presets(args) -> None:
         args.optimization_steps,
         args.circuits,
         args.initial_states,
+        args.n_values,
+        args.l_values,
     )
     selected_keys = {(n, layers, circuit, initial_state) for n, layers, circuit, initial_state, *_ in selected_jobs}
     missing = selected_keys.difference(records)
@@ -457,6 +465,8 @@ def validate_presets(args) -> None:
         args.optimization_steps,
         args.circuits,
         args.initial_states,
+        args.n_values,
+        args.l_values,
     )
     for n, layers, circuit, initial_state, *_ in selected_jobs:
         by_l = presets.get(n, presets.get(str(n), {}))
@@ -529,6 +539,18 @@ def parse_args():
         nargs="+",
         help="Restrict the campaign to these initial-state names.",
     )
+    parser.add_argument(
+        "--n-values",
+        nargs="+",
+        type=int,
+        help="Restrict the campaign to these qubit counts.",
+    )
+    parser.add_argument(
+        "--l-values",
+        nargs="+",
+        type=int,
+        help="Restrict the campaign to these circuit depths.",
+    )
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--max-jobs", type=int)
@@ -537,6 +559,14 @@ def parse_args():
         parser.error("--tries must be at least 1")
     if args.optimization_steps < 1:
         parser.error("--optimization-steps must be at least 1")
+    if args.n_values and any(n < 1 for n in args.n_values):
+        parser.error("--n-values entries must be at least 1")
+    if args.l_values and any(layers < 1 for layers in args.l_values):
+        parser.error("--l-values entries must be at least 1")
+    if args.n_values:
+        args.n_values = tuple(dict.fromkeys(args.n_values))
+    if args.l_values:
+        args.l_values = tuple(dict.fromkeys(args.l_values))
     try:
         if args.circuits:
             args.circuits = tuple(dict.fromkeys(map(fcq.resolve_unitary_circuit, args.circuits)))

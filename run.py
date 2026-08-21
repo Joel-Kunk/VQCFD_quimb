@@ -72,18 +72,18 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="exp_only",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
+        mode="gradient",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
         # `exp_only` always computes both metrics; this flag is for full runs.
         compute_expr_cap=False,
         # Use one name/None, or a list to sweep over multiple circuits.
-        unitary_circuit= [None],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
+        unitary_circuit= [None,"multiscale_tree"],#["mps_staircase_light","mps_staircase"],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree", "local_ry_rz",
         # "ghz_orbit", "ring_trainable_crz", "all_to_all_crx", "block_crx",
         # "mps_staircase", "mps_staircase_light"
         # Example sweep: [None, "uni2", "multiscale_tree"]
         # Use one name/None, or a list to sweep over multiple initial states.
-        initial_state=None,#["positive_periodic_wave","mixed_sine_modes","tapered_gaussian"],
+        initial_state=None,#[None,"positive_periodic_wave","mixed_sine_modes","tapered_gaussian"],
         # Options: "positive_hump", "positive_periodic_wave",
         # "mixed_sine_modes", "tapered_gaussian", "tapered_tanh"
         # Example sweep: ["positive_hump", "tapered_gaussian"]
@@ -113,8 +113,8 @@ def main() -> None:
             (5, 2),
         ]
     elif run_mode == "grid":
-        ns = [7]
-        ls = [1]
+        ns = [6]
+        ls = [7]
         base_todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")
