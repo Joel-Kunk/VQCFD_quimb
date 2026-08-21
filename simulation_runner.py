@@ -5,11 +5,14 @@ from pathlib import Path
 from typing import Callable
 import time
 
+import cotengra
 import numpy as np
+import quimb as qu
 import quimb.tensor as qtn
 from scipy.optimize import minimize
 
 import functions.circuits_quimb as fcq
+import functions.contraction_paths as fcp
 import functions.expr_entcap as fex
 import functions.functions_quimb as fqu
 import functions.initial_states as fist
@@ -31,6 +34,8 @@ class RuntimeContext:
     n: int
     l: int
     unitary_circuit: str
+    contraction_paths: fcp.ContractionPathSet | None = None
+    pure_state_path: fcp.ContractionPathSet | None = None
 
 
 def format_elapsed(seconds: float) -> str:
@@ -135,6 +140,171 @@ def build_runtime(cfg: SimConfig, plot_circuit: bool = True) -> RuntimeContext:
     )
 
 
+def _contraction_path_cache_file(
+    cfg: SimConfig,
+    kind: str,
+    simplify_sequence: str,
+) -> Path:
+    simplify_label = simplify_sequence or "none"
+    filename = (
+        f"{kind}_N{cfg.n}_L{cfg.l}_{cfg.resolved_unitary_circuit}_"
+        f"simplify-{simplify_label}.yaml"
+    )
+    return Path(cfg.contraction_path_cache_dir) / filename
+
+
+def _contraction_path_metadata(
+    cfg: SimConfig,
+    *,
+    kind: str,
+    simplify_sequence: str,
+    seed: int | None = None,
+) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "n": int(cfg.n),
+        "l": int(cfg.l),
+        "unitary_circuit": cfg.resolved_unitary_circuit,
+        "simplify_sequence": simplify_sequence,
+        "objective": cfg.contraction_path_objective,
+        "methods": list(cfg.contraction_path_methods),
+        "repeats": int(cfg.contraction_path_repeats),
+        "max_time_s": cfg.contraction_path_max_time_s,
+        "seed": int(cfg.contraction_path_seed if seed is None else seed),
+        "quimb_version": qu.__version__,
+        "cotengra_version": cotengra.__version__,
+        "topology_scheme": "generic-parameters-v1",
+    }
+
+
+def _prepare_local_contraction_paths(
+    cfg: SimConfig,
+    rt: RuntimeContext,
+) -> fcp.ContractionPathSet | None:
+    if not cfg.optimize_contraction_paths:
+        return None
+
+    # Use deterministic, non-special values so simplification exposes the
+    # generic topology shared by every parameter update and initial state.
+    rng = np.random.default_rng(cfg.contraction_path_seed)
+    current_params = rng.uniform(0.137, 2 * np.pi - 0.137, rt.n_params)
+    reference_params = rng.uniform(0.173, 2 * np.pi - 0.173, rt.n_params)
+    unitary = fqu.make_optimization_unitary(
+        rt.n,
+        rt.l,
+        current_params,
+        1.234,
+        rt.unitary_circuit,
+    )
+    references = fqu.make_inverse_reference_circuits(
+        reference_params,
+        rt.n,
+        rt.l,
+        rt.unitary_circuit,
+    )
+    simplify_sequence = cfg.contraction_path_simplify_sequence
+
+    rehearse_fns = []
+    for reference in references:
+        def rehearse(optimize, reference=reference):
+            circuit = fqu.embed_circuit(unitary, reference, rt.wires)
+            return circuit.local_expectation(
+                qu.pauli("Z"),
+                0,
+                simplify_sequence=simplify_sequence,
+                optimize=optimize,
+                rehearse=True,
+            )
+
+        rehearse_fns.append(rehearse)
+
+    result = fcp.prepare_contraction_paths(
+        kind="local_expectations",
+        labels=tuple(f"c{i}" for i in range(1, 6)),
+        rehearse_fns=rehearse_fns,
+        simplify_sequence=simplify_sequence,
+        metadata=_contraction_path_metadata(
+            cfg,
+            kind="local_expectations",
+            simplify_sequence=simplify_sequence,
+        ),
+        methods=cfg.contraction_path_methods,
+        objective=cfg.contraction_path_objective,
+        repeats=cfg.contraction_path_repeats,
+        max_time_s=cfg.contraction_path_max_time_s,
+        seed=cfg.contraction_path_seed,
+        cache_path=_contraction_path_cache_file(
+            cfg,
+            "local_expectations",
+            simplify_sequence,
+        ),
+        reuse_saved=cfg.contraction_path_reuse_saved,
+        verbose=cfg.verbose,
+    )
+    rt.contraction_paths = result
+    return result
+
+
+def _prepare_pure_state_path(
+    cfg: SimConfig,
+    rt: RuntimeContext | None = None,
+) -> fcp.ContractionPathSet | None:
+    if not cfg.optimize_contraction_paths:
+        return None
+    if rt is not None and rt.pure_state_path is not None:
+        return rt.pure_state_path
+
+    circuit_name = cfg.resolved_unitary_circuit
+    n_params = fcq.num_unitary_parameters(cfg.n, cfg.l, circuit_name)
+    rng = np.random.default_rng(cfg.contraction_path_seed + 10_000)
+    params = rng.uniform(0.191, 2 * np.pi - 0.191, n_params)
+    circuit = fcq.make_pure_unitary_circuit(
+        cfg.n,
+        cfg.l,
+        params,
+        parametrize=False,
+        unitary_circuit=circuit_name,
+    )
+    simplify_sequence = "R"
+
+    def rehearse(optimize):
+        return circuit.to_dense(
+            simplify_sequence=simplify_sequence,
+            optimize=optimize,
+            rehearse=True,
+        )
+
+    result = fcp.prepare_contraction_paths(
+        kind="pure_state",
+        labels=("statevector",),
+        rehearse_fns=(rehearse,),
+        simplify_sequence=simplify_sequence,
+        metadata=_contraction_path_metadata(
+            cfg,
+            kind="pure_state",
+            simplify_sequence=simplify_sequence,
+            seed=cfg.contraction_path_seed + 10_000,
+        ),
+        methods=cfg.contraction_path_methods,
+        objective=cfg.contraction_path_objective,
+        repeats=cfg.contraction_path_repeats,
+        max_time_s=cfg.contraction_path_max_time_s,
+        seed=cfg.contraction_path_seed + 10_000,
+        cache_path=_contraction_path_cache_file(cfg, "pure_state", simplify_sequence),
+        reuse_saved=cfg.contraction_path_reuse_saved,
+        verbose=cfg.verbose,
+    )
+    if rt is not None:
+        rt.pure_state_path = result
+    return result
+
+
+def _path_args(rt: RuntimeContext) -> tuple[object, str]:
+    if rt.contraction_paths is None:
+        return None, "RC"
+    return rt.contraction_paths.paths, rt.contraction_paths.simplify_sequence
+
+
 def resolve_initial_params_with_fallback(
     cfg: SimConfig,
     rt: RuntimeContext,
@@ -204,6 +374,7 @@ def _make_quimb_unitary(rt: RuntimeContext, prev_params_quimb: np.ndarray):
 def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
     inv = _build_inverse_circuits(cfg, rt, state.prev_params_quimb)
+    paths, simplify_sequence = _path_args(rt)
 
     unitary_opt = qtn.TNOptimizer(
         quimb_unitary,
@@ -219,6 +390,10 @@ def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             dt=cfg.dt,
             dx=dx,
             mu=cfg.mu,
+        ),
+        loss_kwargs=dict(
+            paths=paths,
+            simplify_sequence=simplify_sequence,
         ),
         autodiff_backend="autograd",
     )
@@ -239,14 +414,7 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
     curr_params = state.prev_params_quimb.copy()
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
     inv = _build_inverse_circuits(cfg, rt, state.prev_params_quimb)
-    unitary0 = fqu.make_optimization_unitary2(
-        rt.n,
-        rt.l,
-        state.prev_params_quimb[1:],
-        state.prev_params_quimb[0],
-        rt.unitary_circuit,
-    )
-    trees = [fqu.build_local_exp_tree(unitary0, circuit, rt.wires) for circuit in inv]
+    paths, simplify_sequence = _path_args(rt)
 
     t = 0
     m = np.zeros(len(state.prev_params_quimb))
@@ -266,6 +434,8 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             cfg.dt,
             dx,
             cfg.mu,
+            paths,
+            simplify_sequence,
         )
     )
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
@@ -290,11 +460,24 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             cfg.mu,
             cfg.n,
             cfg.l,
-            trees,
+            paths,
             rt.unitary_circuit,
+            simplify_sequence,
         )
         grad[0] = fqu.grad_mod(
-            quimb_unitary, inv[0], inv[1], inv[2], inv[3], inv[4], state.prev_params_quimb[0], rt.wires, cfg.dt, dx, cfg.mu
+            quimb_unitary,
+            inv[0],
+            inv[1],
+            inv[2],
+            inv[3],
+            inv[4],
+            state.prev_params_quimb[0],
+            rt.wires,
+            cfg.dt,
+            dx,
+            cfg.mu,
+            paths,
+            simplify_sequence,
         )
 
         curr_params, m, v = fqu.adam_update(curr_params, grad, m, v, t)
@@ -312,6 +495,8 @@ def step_adam_exact(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
                 cfg.dt,
                 dx,
                 cfg.mu,
+                paths,
+                simplify_sequence,
             )
         )
         params_iters.append(curr_params.copy())
@@ -333,6 +518,7 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
     curr_params = state.prev_params_quimb.copy()
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
     inv = _build_inverse_circuits(cfg, rt, state.prev_params_quimb)
+    paths, simplify_sequence = _path_args(rt)
 
     t = 0
     m = np.zeros(len(state.prev_params_quimb))
@@ -352,6 +538,8 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             cfg.dt,
             dx,
             cfg.mu,
+            paths,
+            simplify_sequence,
         )
     )
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
@@ -378,9 +566,24 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
             cfg.n,
             cfg.l,
             rt.unitary_circuit,
+            paths,
+            simplify_sequence,
         )
         grad[0] = fqu.grad_mod_shots(
-            quimb_unitary, inv[0], inv[1], inv[2], inv[3], inv[4], state.prev_params_quimb[0], rt.wires, cfg.dt, dx, cfg.mu, cfg.shots
+            quimb_unitary,
+            inv[0],
+            inv[1],
+            inv[2],
+            inv[3],
+            inv[4],
+            state.prev_params_quimb[0],
+            rt.wires,
+            cfg.dt,
+            dx,
+            cfg.mu,
+            cfg.shots,
+            paths,
+            simplify_sequence,
         )
 
         curr_params, m, v = fqu.adam_update(curr_params, grad, m, v, t)
@@ -398,6 +601,8 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
                 cfg.dt,
                 dx,
                 cfg.mu,
+                paths,
+                simplify_sequence,
             )
         )
         params_iters.append(curr_params.copy())
@@ -419,6 +624,7 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
 def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
     curr_params = state.prev_params_quimb.copy()
     inv = _build_inverse_circuits(cfg, rt, curr_params)
+    paths, simplify_sequence = _path_args(rt)
     bounds = [(-10000, 100000)] + [(-2 * np.pi, 2 * np.pi)] * rt.n_params
     cost_iters = []
     params_iters = [curr_params.copy()]
@@ -443,6 +649,8 @@ def step_cobyla_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: f
             cfg.l,
             params_iters,
             rt.unitary_circuit,
+            paths,
+            simplify_sequence,
         ),
         method="COBYLA",
         bounds=bounds,
@@ -513,6 +721,9 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
         values["initial_params_fit_time_s"] = float(initial_params_fit_time)
 
     state = init_state(cfg, values, initial_params)
+    path_set = _prepare_local_contraction_paths(cfg, rt)
+    if path_set is not None:
+        state.values["contraction_paths"] = path_set.summary()
 
     params_ref = initial_params.copy()
     params_ref[0] = 1.0
@@ -522,21 +733,7 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
         params_ref[1:], cfg.n, cfg.l, rt.unitary_circuit
     )
 
-    unitary0 = fcq.make_optimization_unitary2(
-        cfg.n,
-        cfg.l,
-        params_ref[1:],
-        params_ref[0],
-        rt.unitary_circuit,
-    )
-
-    trees = [
-        fqu.build_local_exp_tree(unitary0, qc1, wires),
-        fqu.build_local_exp_tree(unitary0, qc2, wires),
-        fqu.build_local_exp_tree(unitary0, qc3, wires),
-        fqu.build_local_exp_tree(unitary0, qc4, wires),
-        fqu.build_local_exp_tree(unitary0, qc5, wires),
-    ]
+    paths, simplify_sequence = _path_args(rt)
 
     circuit_derivatives = np.empty((5, n_params, cfg.gradient_sweeps), dtype=float)
     start = time.perf_counter()
@@ -555,8 +752,9 @@ def run_gradient_analysis(cfg: SimConfig) -> SimState:
             wires,
             cfg.n,
             cfg.l,
-            trees,
+            paths,
             rt.unitary_circuit,
+            simplify_sequence,
         )
         circuit_derivatives[:, :, i] = local_gradients[:, 1:]
         completed_sweeps = i + 1
@@ -616,6 +814,12 @@ def run_exp_only(cfg: SimConfig) -> SimState:
         np.random.seed(cfg.random_seed)
 
     values = build_values(cfg)
+    pure_path_set = _prepare_pure_state_path(cfg)
+    if pure_path_set is not None:
+        values["pure_state_contraction_path"] = pure_path_set.summary()
+        optimize = pure_path_set.paths[0]
+    else:
+        optimize = "auto-hq"
     start = time.perf_counter()
     circuit = fex.unitary_pure(cfg.n, cfg.l, cfg.resolved_unitary_circuit)
     expressibility, entangling_capability = fex.expr_and_ent_cap(
@@ -623,6 +827,7 @@ def run_exp_only(cfg: SimConfig) -> SimState:
         cfg.expr_entcap_samples,
         cfg.expr_bins,
         verbose=cfg.verbose,
+        optimize=optimize,
     )
     elapsed = time.perf_counter() - start
     values.update(
@@ -679,14 +884,24 @@ def run_simulation(cfg: SimConfig) -> SimState:
         values["initial_params_fit_time_s"] = float(initial_params_fit_time)
 
     state = init_state(cfg, values, initial_params)
+    path_set = _prepare_local_contraction_paths(cfg, rt)
+    if path_set is not None:
+        state.values["contraction_paths"] = path_set.summary()
 
     if cfg.compute_expr_cap:
+        pure_path_set = _prepare_pure_state_path(cfg, rt)
+        if pure_path_set is not None:
+            state.values["pure_state_contraction_path"] = pure_path_set.summary()
+            optimize = pure_path_set.paths[0]
+        else:
+            optimize = "auto-hq"
         circ = fex.unitary_pure(cfg.n, cfg.l, rt.unitary_circuit)
         exp_and_cap = fex.expr_and_ent_cap(
             circ,
             cfg.expr_entcap_samples,
             cfg.expr_bins,
             verbose=cfg.verbose,
+            optimize=optimize,
         )
         state.values["expressibility"] = float(exp_and_cap[0])
         state.values["entangling_capability"] = float(exp_and_cap[1])

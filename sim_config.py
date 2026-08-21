@@ -58,6 +58,19 @@ class SimConfig:
     expr_entcap_samples: int = 100000
     expr_bins: int = 100
 
+    # Spend a one-off search budget on each distinct contraction topology,
+    # then reuse the selected positional path for every parameter update and
+    # time step. The cache is independent of the chosen initial state.
+    optimize_contraction_paths: bool = True
+    contraction_path_repeats: int = 256
+    contraction_path_max_time_s: float | None = 60.0
+    contraction_path_seed: int = 0
+    contraction_path_methods: tuple[str, ...] = ("greedy", "kahypar")
+    contraction_path_objective: str = "combo"
+    contraction_path_simplify_sequence: str = "RC"
+    contraction_path_cache_dir: str = ".contraction_paths"
+    contraction_path_reuse_saved: bool = True
+
     # Requested number of scalar parameter gradients. Gradient mode rounds this
     # down to the nearest complete random-parameter sweep.
     gradient_tries: int | None = None
@@ -74,6 +87,15 @@ class SimConfig:
             self.gradient_tries = default_gradient_tries(self.n)
         if self.gradient_tries is not None and self.gradient_tries < 1:
             raise ValueError("gradient_tries must be at least 1.")
+        if self.contraction_path_repeats < 1:
+            raise ValueError("contraction_path_repeats must be at least 1.")
+        if (
+            self.contraction_path_max_time_s is not None
+            and self.contraction_path_max_time_s <= 0
+        ):
+            raise ValueError("contraction_path_max_time_s must be positive or None.")
+        if not self.contraction_path_methods:
+            raise ValueError("contraction_path_methods must contain at least one method.")
 
     @property
     def results_dir(self) -> Path:

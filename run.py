@@ -68,15 +68,22 @@ def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
 
 
 def main() -> None:
-    run_mode = "grid"  # "single" | "pairs" | "grid"
+    run_mode = "single"  # "single" | "pairs" | "grid"
 
     # Common options applied to every run.
     common = dict(
-        mode="gradient",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
+        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
         # `exp_only` always computes both metrics; this flag is for full runs.
         compute_expr_cap=False,
+        # Search each fixed contraction topology thoroughly once, persist the
+        # best exact path, and reuse it for every optimization/time step.
+        optimize_contraction_paths=True,
+        contraction_path_repeats=256,
+        contraction_path_max_time_s=600.0,  # Per c_i (and pure-state path).
+        contraction_path_seed=0,
+        contraction_path_reuse_saved=True,
         # Use one name/None, or a list to sweep over multiple circuits.
-        unitary_circuit= [None,"multiscale_tree"],#["mps_staircase_light","mps_staircase"],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
+        unitary_circuit= None,#"mps_staircase_light",#["mps_staircase_light","mps_staircase"],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
         # Options: "uni2", "brickwork_ring_ry", "ring_ry_rz",
         # "ring_trainable_crx", "multiscale_tree", "local_ry_rz",
         # "ghz_orbit", "ring_trainable_crz", "all_to_all_crx", "block_crx",
@@ -89,7 +96,8 @@ def main() -> None:
         # Example sweep: ["positive_hump", "tapered_gaussian"]
         # expr_entcap_samples = 20000,
         # gradient_tries = 5000,
-        # dir_label = "tests",
+        dir_label = "tests",
+        label = "N4_L3",
     )
 
     sweep_common = common.copy()

@@ -67,13 +67,64 @@ def embed_circuit(qc_small,qc_big,qubits):
     return qcn
 
 
-def cost_quimb(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu):
+def local_expectations(
+    unitary,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    wires,
+    paths=None,
+    simplify_sequence="RC",
+):
+    """Evaluate the five VQCFD expectations with optional exact paths."""
+    circuits = (qc1, qc2, qc3, qc4, qc5)
+    if paths is None:
+        optimizers = ("auto-hq",) * len(circuits)
+    else:
+        if len(paths) != len(circuits):
+            raise ValueError("Exactly five contraction paths are required.")
+        optimizers = paths
 
-    c1 = embed_circuit(unitary,qc1,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c2 = embed_circuit(unitary,qc2,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c3 = embed_circuit(unitary,qc3,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c4 = embed_circuit(unitary,qc4,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c5 = embed_circuit(unitary,qc5,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
+    return tuple(
+        embed_circuit(unitary, qc, wires).local_expectation(
+            qu.pauli("Z"),
+            0,
+            simplify_sequence=simplify_sequence,
+            optimize=optimize,
+        )
+        for qc, optimize in zip(circuits, optimizers)
+    )
+
+
+def cost_quimb(
+    unitary,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    paths=None,
+    simplify_sequence="RC",
+):
+
+    c1, c2, c3, c4, c5 = local_expectations(
+        unitary,
+        qc1,
+        qc2,
+        qc3,
+        qc4,
+        qc5,
+        wires,
+        paths,
+        simplify_sequence,
+    )
 
     lbd0 = unitary.gates[-1].params[0]
 
@@ -96,13 +147,34 @@ def initial_cost_quimb(qc,des):
     temp = anp.sum(anp.array([anp.abs(u_temp[i] - des[i])**2 for i in range(n_t)]))
     return temp
 
-def cost_quimb_shots(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots):
+def cost_quimb_shots(
+    unitary,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    shots,
+    paths=None,
+    simplify_sequence="RC",
+):
 
-    c1 = embed_circuit(unitary,qc1,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c2 = embed_circuit(unitary,qc2,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c3 = embed_circuit(unitary,qc3,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c4 = embed_circuit(unitary,qc4,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c5 = embed_circuit(unitary,qc5,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
+    c1, c2, c3, c4, c5 = local_expectations(
+        unitary,
+        qc1,
+        qc2,
+        qc3,
+        qc4,
+        qc5,
+        wires,
+        paths,
+        simplify_sequence,
+    )
     c1 = max(-1.0, min(1.0, np.real(c1)))
     c2 = max(-1.0, min(1.0, np.real(c2)))
     c3 = max(-1.0, min(1.0, np.real(c3)))
@@ -164,6 +236,8 @@ def cost_quimb_shots2(
     L,
     params_iters,
     unitary_circuit=None,
+    paths=None,
+    simplify_sequence="RC",
 ):
 
     unitary_qu = make_optimization_unitary(
@@ -174,11 +248,17 @@ def cost_quimb_shots2(
         unitary_circuit=unitary_circuit,
     )
 
-    c1 = embed_circuit(unitary_qu,qc1,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c2 = embed_circuit(unitary_qu,qc2,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c3 = embed_circuit(unitary_qu,qc3,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c4 = embed_circuit(unitary_qu,qc4,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c5 = embed_circuit(unitary_qu,qc5,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
+    c1, c2, c3, c4, c5 = local_expectations(
+        unitary_qu,
+        qc1,
+        qc2,
+        qc3,
+        qc4,
+        qc5,
+        wires,
+        paths,
+        simplify_sequence,
+    )
     c1 = max(-1.0, min(1.0, np.real(c1)))
     c2 = max(-1.0, min(1.0, np.real(c2)))
     c3 = max(-1.0, min(1.0, np.real(c3)))
@@ -241,6 +321,8 @@ def grad_param_shift(
     N,
     L,
     unitary_circuit=None,
+    paths=None,
+    simplify_sequence="RC",
 ):
     grad = np.zeros(len(params))
     for i in range(1,len(params)):
@@ -254,8 +336,38 @@ def grad_param_shift(
         uni_m = make_optimization_unitary(
             N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
         )
-        cost_p = cost_quimb_shots(uni_p,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots)
-        cost_m = cost_quimb_shots(uni_m,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots)
+        cost_p = cost_quimb_shots(
+            uni_p,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            lbd0_t,
+            wires,
+            dt,
+            dx,
+            mu,
+            shots,
+            paths,
+            simplify_sequence,
+        )
+        cost_m = cost_quimb_shots(
+            uni_m,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            lbd0_t,
+            wires,
+            dt,
+            dx,
+            mu,
+            shots,
+            paths,
+            simplify_sequence,
+        )
         grad[i] = hadamard_test_parameter_shift(cost_p, cost_m)
     
     return grad
@@ -276,6 +388,8 @@ def single_grad_finite_diff(
     N,
     L,
     unitary_circuit=None,
+    paths=None,
+    simplify_sequence="RC",
 ):
     uni1 = make_optimization_unitary(
         N, L, params[1:], params[0] + h / 2, unitary_circuit
@@ -283,7 +397,38 @@ def single_grad_finite_diff(
     uni2 = make_optimization_unitary(
         N, L, params[1:], params[0] - h / 2, unitary_circuit
     )
-    diff = (cost_quimb(uni1,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu) - cost_quimb(uni2,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu))/h
+    diff = (
+        cost_quimb(
+            uni1,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            lbd0_t,
+            wires,
+            dt,
+            dx,
+            mu,
+            paths,
+            simplify_sequence,
+        )
+        - cost_quimb(
+            uni2,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            lbd0_t,
+            wires,
+            dt,
+            dx,
+            mu,
+            paths,
+            simplify_sequence,
+        )
+    ) / h
     return diff
 
 def adam_update(
@@ -340,13 +485,34 @@ def adam_update(
     return theta, m, v
 
 
-def grad_mod_shots(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots):
+def grad_mod_shots(
+    unitary,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    shots,
+    paths=None,
+    simplify_sequence="RC",
+):
 
-    c1 = embed_circuit(unitary,qc1,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c2 = embed_circuit(unitary,qc2,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c3 = embed_circuit(unitary,qc3,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c4 = embed_circuit(unitary,qc4,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c5 = embed_circuit(unitary,qc5,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
+    c1, c2, c3, c4, c5 = local_expectations(
+        unitary,
+        qc1,
+        qc2,
+        qc3,
+        qc4,
+        qc5,
+        wires,
+        paths,
+        simplify_sequence,
+    )
     c1 = max(-1.0, min(1.0, np.real(c1)))
     c2 = max(-1.0, min(1.0, np.real(c2)))
     c3 = max(-1.0, min(1.0, np.real(c3)))
@@ -389,30 +555,48 @@ def grad_mod_shots(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu,shots):
     
     return anp.real(cost).astype(anp.float64).reshape(())
 
-def build_local_exp_tree(unitary, qc, wires):
+def build_local_exp_tree(
+    unitary,
+    qc,
+    wires,
+    optimize="auto-hq",
+    simplify_sequence="RC",
+):
     circ = embed_circuit(unitary, qc, wires)
 
     info = circ.local_expectation(
         qu.pauli('Z'),
         0,
-        simplify_sequence="",
+        simplify_sequence=simplify_sequence,
+        optimize=optimize,
         rehearse=True,
     )
     return info["tree"]
 
-def local_expectations_cached(unitary, qc1, qc2, qc3, qc4, qc5, wires, trees):
+def local_expectations_cached(
+    unitary,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    wires,
+    paths,
+    simplify_sequence="RC",
+):
     """Evaluate the five local expectations used by the VQCFD cost."""
-    circuits = (qc1, qc2, qc3, qc4, qc5)
     return np.asarray(
-        [
-            embed_circuit(unitary, qc, wires).local_expectation(
-                qu.pauli("Z"),
-                0,
-                simplify_sequence="",
-                optimize=tree,
-            )
-            for qc, tree in zip(circuits, trees)
-        ]
+        local_expectations(
+            unitary,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            wires,
+            paths,
+            simplify_sequence,
+        )
     )
 
 
@@ -438,9 +622,10 @@ def cost_from_local_expectations(expectations, lbd0_t, lbd0, dt, dx, mu):
 
 
 def cost_quimb_cached(unitary, qc1, qc2, qc3, qc4, qc5,
-                      lbd0_t,lbd0, wires, dt, dx, mu, trees):
+                      lbd0_t,lbd0, wires, dt, dx, mu, paths,
+                      simplify_sequence="RC"):
     expectations = local_expectations_cached(
-        unitary, qc1, qc2, qc3, qc4, qc5, wires, trees
+        unitary, qc1, qc2, qc3, qc4, qc5, wires, paths, simplify_sequence
     )
     return cost_from_local_expectations(expectations, lbd0_t, lbd0, dt, dx, mu)
 
@@ -455,8 +640,9 @@ def whole_local_expectation_grads_param_shift(
     wires,
     N,
     L,
-    trees,
+    paths,
     unitary_circuit=None,
+    simplify_sequence="RC",
 ):
     """Return derivatives of all five local expectations for every parameter.
 
@@ -471,17 +657,33 @@ def whole_local_expectation_grads_param_shift(
         params_m = params.copy()
         params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
         params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
-        uni_p = make_optimization_unitary2(
+        uni_p = make_optimization_unitary(
             N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
         )
-        uni_m = make_optimization_unitary2(
+        uni_m = make_optimization_unitary(
             N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
         )
         exp_p = local_expectations_cached(
-            uni_p, qc1, qc2, qc3, qc4, qc5, wires, trees
+            uni_p,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            wires,
+            paths,
+            simplify_sequence,
         )
         exp_m = local_expectations_cached(
-            uni_m, qc1, qc2, qc3, qc4, qc5, wires, trees
+            uni_m,
+            qc1,
+            qc2,
+            qc3,
+            qc4,
+            qc5,
+            wires,
+            paths,
+            simplify_sequence,
         )
         local_grads[:, i] = np.real(
             hadamard_test_parameter_shift(exp_p, exp_m)
@@ -522,8 +724,9 @@ def whole_grad_param_shift(
     mu,
     N,
     L,
-    trees,
+    paths,
     unitary_circuit=None,
+    simplify_sequence="RC",
 ):
     local_grads = whole_local_expectation_grads_param_shift(
         params,
@@ -535,8 +738,9 @@ def whole_grad_param_shift(
         wires,
         N,
         L,
-        trees,
+        paths,
         unitary_circuit,
+        simplify_sequence,
     )
     return cost_gradient_from_local_expectation_gradients(
         local_grads,
@@ -548,13 +752,33 @@ def whole_grad_param_shift(
     )
 
 
-def grad_mod(unitary,qc1,qc2,qc3,qc4,qc5,lbd0_t,wires,dt,dx,mu):
+def grad_mod(
+    unitary,
+    qc1,
+    qc2,
+    qc3,
+    qc4,
+    qc5,
+    lbd0_t,
+    wires,
+    dt,
+    dx,
+    mu,
+    paths=None,
+    simplify_sequence="RC",
+):
 
-    c1 = embed_circuit(unitary,qc1,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c2 = embed_circuit(unitary,qc2,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c3 = embed_circuit(unitary,qc3,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c4 = embed_circuit(unitary,qc4,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
-    c5 = embed_circuit(unitary,qc5,wires).local_expectation(qu.pauli('Z'), 0,simplify_sequence="RC")
+    c1, c2, c3, c4, c5 = local_expectations(
+        unitary,
+        qc1,
+        qc2,
+        qc3,
+        qc4,
+        qc5,
+        wires,
+        paths,
+        simplify_sequence,
+    )
 
     lbd0 = unitary.gates[-1].params[0]
 

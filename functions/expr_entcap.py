@@ -43,7 +43,7 @@ def special_distance(u, v, pos):
     return val
 
 
-def expressibility(circ, tries, n_bins):
+def expressibility(circ, tries, n_bins, *, optimize="auto-hq"):
     n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     fidelities = []
@@ -56,7 +56,15 @@ def expressibility(circ, tries, n_bins):
         uni2 = fcq.make_pure_unitary_circuit(
             n, l, params_t2, parametrize=False, unitary_circuit=unitary_circuit
         )
-        fidelities.append(np.abs(np.vdot(uni1.to_dense(), uni2.to_dense())) ** 2)
+        fidelities.append(
+            np.abs(
+                np.vdot(
+                    uni1.to_dense(optimize=optimize),
+                    uni2.to_dense(optimize=optimize),
+                )
+            )
+            ** 2
+        )
 
     p_pqc = np.histogram(fidelities, bins=n_bins)
     bins = p_pqc[1]
@@ -72,7 +80,7 @@ def expressibility(circ, tries, n_bins):
     return kl
 
 
-def entangling_capability(circ, tries):
+def entangling_capability(circ, tries, *, optimize="auto-hq"):
     n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     ent_cap = 0
@@ -81,7 +89,7 @@ def entangling_capability(circ, tries):
         uni = fcq.make_pure_unitary_circuit(
             n, l, params_t, parametrize=False, unitary_circuit=unitary_circuit
         )
-        vec_t = uni.to_dense()
+        vec_t = uni.to_dense(optimize=optimize)
         for j in range(n):
             ent_cap += special_distance(vec_t, vec_t, j)
 
@@ -97,7 +105,7 @@ def _format_elapsed(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
 
 
-def expr_and_ent_cap(circ, tries, n_bins, *, verbose=True):
+def expr_and_ent_cap(circ, tries, n_bins, *, verbose=True, optimize="auto-hq"):
     n, l, unitary_circuit = _circuit_parts(circ)
     num_params = count_total_parameters(circ)
     fidelities = []
@@ -116,8 +124,8 @@ def expr_and_ent_cap(circ, tries, n_bins, *, verbose=True):
         uni2 = fcq.make_pure_unitary_circuit(
             n, l, params_t2, parametrize=False, unitary_circuit=unitary_circuit
         )
-        vec_t1 = uni1.to_dense()
-        vec_t2 = uni2.to_dense()
+        vec_t1 = uni1.to_dense(optimize=optimize)
+        vec_t2 = uni2.to_dense(optimize=optimize)
         fidelities.append(np.abs(np.vdot(vec_t1, vec_t2)) ** 2)
 
         for j in range(n):
