@@ -1,5 +1,6 @@
 import quimb as qu
 import quimb.tensor as qtn
+import quimb.tensor.circuit as qtn_circuit
 import autograd.numpy as anp
 import numpy as np
 import functions.circuits_quimb as fcq
@@ -60,10 +61,22 @@ def make_inverse_reference_circuits(prev_params, qubits, layers, unitary_circuit
         unitary_circuit=unitary_circuit,
     )
 
-def embed_circuit(qc_small,qc_big,qubits):
+def embed_circuit(qc_small, qc_big, qubits):
+    """Embed ``qc_small`` into a copy of ``qc_big``.
+
+    The generated gate arrays are deliberately shared by Quimb's cache across
+    the five expectation contractions in a single loss evaluation. The cache
+    is cleared by :func:`local_expectations` once all five values have been
+    formed so Autograd graphs cannot accumulate between optimizer evaluations.
+    """
     qcn = qc_big.copy()
     for g in qc_small.gates:
-        qcn.apply_gate(g.label,qubits = g.qubits ,params = g.params,contract = False)
+        qcn.apply_gate(
+            g.label,
+            qubits=g.qubits,
+            params=g.params,
+            contract=False,
+        )
     return qcn
 
 
@@ -87,15 +100,23 @@ def local_expectations(
             raise ValueError("Exactly five contraction paths are required.")
         optimizers = paths
 
-    return tuple(
-        embed_circuit(unitary, qc, wires).local_expectation(
-            qu.pauli("Z"),
-            0,
-            simplify_sequence=simplify_sequence,
-            optimize=optimize,
+    try:
+        return tuple(
+            embed_circuit(unitary, qc, wires).local_expectation(
+                qu.pauli("Z"),
+                0,
+                simplify_sequence=simplify_sequence,
+                optimize=optimize,
+            )
+            for qc, optimize in zip(circuits, optimizers)
         )
-        for qc, optimize in zip(circuits, optimizers)
-    )
+    finally:
+        # Quimb's global numeric-gate cache otherwise retains ArrayBox values
+        # and their full VJP graphs. For N6/L3 mps_staircase_light this added
+        # 94 cache entries and roughly 8,400 live Autograd nodes per gradient
+        # evaluation. Clearing here retains cache reuse within the five terms
+        # but releases every graph before the next optimizer evaluation.
+        qtn_circuit._cached_param_gate_build.cache_clear()
 
 
 def cost_quimb(

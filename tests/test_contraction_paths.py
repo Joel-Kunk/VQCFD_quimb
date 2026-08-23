@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import quimb.tensor as qtn
+import quimb.tensor.circuit as qtn_circuit
 
 import functions.circuits_quimb as fcq
 import functions.contraction_paths as fcp
@@ -89,11 +90,19 @@ class ContractionPathTests(unittest.TestCase):
                 autodiff_backend="autograd",
                 progbar=False,
             )
+            # A trainable gate embedded as a non-parametrized gate enters
+            # Quimb's global numeric gate cache. With Autograd that cache then
+            # retains the complete VJP graph from every evaluation.
+            qtn_circuit._cached_param_gate_build.cache_clear()
             value, gradient = optimizer.vectorized_value_and_grad(
                 optimizer.vectorizer.vector
             )
             self.assertTrue(np.isfinite(value))
             self.assertTrue(np.all(np.isfinite(gradient)))
+            self.assertEqual(
+                qtn_circuit._cached_param_gate_build.cache_info().currsize,
+                0,
+            )
 
             gradient_params = np.concatenate(([1.2], current))
             selected_gradient = fqu.whole_local_expectation_grads_param_shift(
