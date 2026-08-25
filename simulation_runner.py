@@ -371,6 +371,26 @@ def _make_quimb_unitary(rt: RuntimeContext, prev_params_quimb: np.ndarray):
     )
 
 
+def _extract_optimized_step_params(
+    opt_unitary,
+    unitary_circuit: str,
+) -> np.ndarray:
+    """Map optimized inverse-circuit tensors back to forward parameters."""
+    values = [np.atleast_1d(value) for value in opt_unitary.get_params().values()]
+    if fcq.resolve_unitary_circuit(unitary_circuit) == "paper_viscid":
+        norm = float(values[-1][0])
+        # The inverse contains the one-angle G-dagger composites in reverse
+        # order. Their stored values are already the forward G angles because
+        # the composite generator, rather than a negated angle, forms G-dagger.
+        forward_angles = np.concatenate(list(reversed(values[:-1])))
+        return np.concatenate(([norm], forward_angles))
+
+    inverse_params = np.concatenate([-value for value in values])
+    forward_params = inverse_params[::-1]
+    forward_params[0] = -inverse_params[-1]
+    return forward_params
+
+
 def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: float, step_idx: int) -> None:
     quimb_unitary = _make_quimb_unitary(rt, state.prev_params_quimb)
     inv = _build_inverse_circuits(cfg, rt, state.prev_params_quimb)
@@ -399,9 +419,10 @@ def step_noise_free(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
     )
     opt_unitary = unitary_opt.optimize(cfg.optimization_steps)
 
-    t_params_quimb = np.concatenate([-np.atleast_1d(v) for v in opt_unitary.get_params().values()])
-    next_params = t_params_quimb[::-1]
-    next_params[0] = -t_params_quimb[-1]
+    next_params = _extract_optimized_step_params(
+        opt_unitary,
+        rt.unitary_circuit,
+    )
 
     state.prev_params_quimb = next_params
     state.params_list_quimb.append(next_params.copy())
@@ -617,7 +638,14 @@ def step_adam_shots(cfg: SimConfig, state: SimState, rt: RuntimeContext, dx: flo
     np.save(cfg.data_dir / f"params_iter_{cfg.full_label}_{step_idx}.npy", np.asarray(params_iters))
     state.cost_list.append(float(cost_iters[-1]))
     state.prev_params_quimb = curr_params.copy()
-    shots_this_timestep = int(t * (10 * len(curr_params) - 5) * cfg.shots)
+    angle_evaluations = fqu.parameter_shift_evaluations_per_sweep(
+        rt.n_params,
+        rt.unitary_circuit,
+        rt.n,
+    )
+    # Each shifted cost evaluates five Hadamard circuits; the norm derivative
+    # adds one further set of five circuits per Adam iteration.
+    shots_this_timestep = int(t * 5 * (angle_evaluations + 1) * cfg.shots)
     state.shots_per_timestep.append(shots_this_timestep)
 
 
@@ -690,6 +718,13 @@ def build_values(cfg: SimConfig) -> dict[str, float | int | str]:
         "initial_state": cfg.resolved_initial_state,
         "number_of_parameters": cfg.number_of_parameters,
         "number_of_optimization_parameters": cfg.number_of_optimization_parameters,
+        "parameter_shift_evaluations_per_angle_sweep": (
+            fqu.parameter_shift_evaluations_per_sweep(
+                cfg.number_of_parameters,
+                cfg.resolved_unitary_circuit,
+                cfg.n,
+            )
+        ),
     }
 
 

@@ -7,21 +7,64 @@ import functions.circuits_quimb as fcq
 
 
 HADAMARD_TEST_PARAMETER_SHIFT = np.pi
+PAPER_G_PARAMETER_SHIFT = np.pi / 2
 
 
 def hadamard_test_parameter_shift(value_plus, value_minus):
-    """Return the exact two-evaluation derivative for a unitary angle.
+    """Return the exact two-evaluation derivative for a single-use angle.
 
-    In the Hadamard-test objective used here, every current circuit parameter
+    In the standard Hadamard-test circuit options, every current parameter
     occurs once in a rotation matrix and therefore enters the objective as
 
         f(theta) = a + b cos(theta / 2) + c sin(theta / 2).
 
     Thus ``f'(theta) = (f(theta + pi) - f(theta - pi)) / 4``.  Choosing the
     shift pi keeps the evaluation count at two and maximizes the difference
-    signal, which is also preferable when the two values are shot estimates.
+    signal. The conjugated CNOT blocks in ``paper_viscid`` have integer-angle
+    harmonics and use the separate two-point rule returned by
+    :func:`parameter_shift_rule`.
     """
     return (value_plus - value_minus) / 4
+
+
+def parameter_shift_rule(
+    unitary_circuit=None,
+    parameter_index: int = 0,
+    qubits: int | None = None,
+):
+    """Return exact ``(shift, weight)`` pairs for one circuit parameter.
+
+    Ordinary circuit options contain each angle in one rotation and use the
+    half-angle Hadamard-overlap rule. In ``paper_viscid``, each logical angle
+    parametrizes a complete conjugated-CNOT block
+
+        G(theta) = RY(theta) CX RY(-theta),
+
+    whose matrix elements contain only constant, cos(theta), and sin(theta)
+    terms. Its derivative therefore also needs only two evaluations, now at
+    shifts +/-pi/2 with weights +/-1/2.
+    """
+    if fcq.resolve_unitary_circuit(unitary_circuit) != "paper_viscid":
+        return (
+            (HADAMARD_TEST_PARAMETER_SHIFT, 0.25),
+            (-HADAMARD_TEST_PARAMETER_SHIFT, -0.25),
+        )
+
+    return (
+        (PAPER_G_PARAMETER_SHIFT, 0.5),
+        (-PAPER_G_PARAMETER_SHIFT, -0.5),
+    )
+
+
+def parameter_shift_evaluations_per_sweep(
+    num_parameters: int,
+    unitary_circuit=None,
+    qubits: int | None = None,
+) -> int:
+    return sum(
+        len(parameter_shift_rule(unitary_circuit, parameter_index, qubits))
+        for parameter_index in range(num_parameters)
+    )
 
 
 def make_state_circuit(qubits, layers, params, unitary_circuit=None):
@@ -347,49 +390,35 @@ def grad_param_shift(
 ):
     grad = np.zeros(len(params))
     for i in range(1,len(params)):
-        params_p = params.copy()
-        params_m = params.copy()
-        params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
-        params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
-        uni_p = make_optimization_unitary(
-            N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
-        )
-        uni_m = make_optimization_unitary(
-            N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
-        )
-        cost_p = cost_quimb_shots(
-            uni_p,
-            qc1,
-            qc2,
-            qc3,
-            qc4,
-            qc5,
-            lbd0_t,
-            wires,
-            dt,
-            dx,
-            mu,
-            shots,
-            paths,
-            simplify_sequence,
-        )
-        cost_m = cost_quimb_shots(
-            uni_m,
-            qc1,
-            qc2,
-            qc3,
-            qc4,
-            qc5,
-            lbd0_t,
-            wires,
-            dt,
-            dx,
-            mu,
-            shots,
-            paths,
-            simplify_sequence,
-        )
-        grad[i] = hadamard_test_parameter_shift(cost_p, cost_m)
+        derivative = 0.0
+        for shift, weight in parameter_shift_rule(unitary_circuit, i - 1, N):
+            shifted_params = params.copy()
+            shifted_params[i] += shift
+            shifted_unitary = make_optimization_unitary(
+                N,
+                L,
+                shifted_params[1:],
+                lbd0=params[0],
+                unitary_circuit=unitary_circuit,
+            )
+            shifted_cost = cost_quimb_shots(
+                shifted_unitary,
+                qc1,
+                qc2,
+                qc3,
+                qc4,
+                qc5,
+                lbd0_t,
+                wires,
+                dt,
+                dx,
+                mu,
+                shots,
+                paths,
+                simplify_sequence,
+            )
+            derivative += weight * shifted_cost
+        grad[i] = derivative
     
     return grad
 
@@ -674,41 +703,30 @@ def whole_local_expectation_grads_param_shift(
     local_grads = np.zeros((5, len(params)), dtype=float)
 
     for i in range(1, len(params)):
-        params_p = params.copy()
-        params_m = params.copy()
-        params_p[i] += HADAMARD_TEST_PARAMETER_SHIFT
-        params_m[i] -= HADAMARD_TEST_PARAMETER_SHIFT
-        uni_p = make_optimization_unitary(
-            N, L, params_p[1:], lbd0=params[0], unitary_circuit=unitary_circuit
-        )
-        uni_m = make_optimization_unitary(
-            N, L, params_m[1:], lbd0=params[0], unitary_circuit=unitary_circuit
-        )
-        exp_p = local_expectations_cached(
-            uni_p,
-            qc1,
-            qc2,
-            qc3,
-            qc4,
-            qc5,
-            wires,
-            paths,
-            simplify_sequence,
-        )
-        exp_m = local_expectations_cached(
-            uni_m,
-            qc1,
-            qc2,
-            qc3,
-            qc4,
-            qc5,
-            wires,
-            paths,
-            simplify_sequence,
-        )
-        local_grads[:, i] = np.real(
-            hadamard_test_parameter_shift(exp_p, exp_m)
-        )
+        derivative = np.zeros(5, dtype=complex)
+        for shift, weight in parameter_shift_rule(unitary_circuit, i - 1, N):
+            shifted_params = params.copy()
+            shifted_params[i] += shift
+            shifted_unitary = make_optimization_unitary(
+                N,
+                L,
+                shifted_params[1:],
+                lbd0=params[0],
+                unitary_circuit=unitary_circuit,
+            )
+            shifted_expectations = local_expectations_cached(
+                shifted_unitary,
+                qc1,
+                qc2,
+                qc3,
+                qc4,
+                qc5,
+                wires,
+                paths,
+                simplify_sequence,
+            )
+            derivative += weight * shifted_expectations
+        local_grads[:, i] = np.real(derivative)
 
     return local_grads
 

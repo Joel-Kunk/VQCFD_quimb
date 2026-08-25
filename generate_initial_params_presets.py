@@ -62,6 +62,8 @@ def _apply_gate(state, matrix, qubits: tuple[int, ...], n: int):
 
 
 def _gate_matrix(gate: str, theta: float | None = None):
+    if gate == "X":
+        return np.array([[0, 1], [1, 0]], dtype=complex)
     if gate == "CX":
         return np.array(
             [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]],
@@ -72,6 +74,19 @@ def _gate_matrix(gate: str, theta: float | None = None):
     sine = np.sin(theta / 2)
     if gate == "RY":
         return np.array([[cosine, -sine], [sine, cosine]], dtype=complex)
+    if gate == "RX":
+        return np.array(
+            [[cosine, -1j * sine], [-1j * sine, cosine]],
+            dtype=complex,
+        )
+    if gate == "PAPER_G":
+        identity = np.eye(2, dtype=complex)
+        before = np.kron(identity, _gate_matrix("RY", -theta))
+        after = np.kron(identity, _gate_matrix("RY", theta))
+        return after @ _gate_matrix("CX") @ before
+    if gate == "PAPER_G_ACTIVE":
+        x_gate = np.array([[0, 1], [1, 0]], dtype=complex)
+        return _gate_matrix("RY", theta) @ x_gate @ _gate_matrix("RY", -theta)
     if gate == "RZ":
         return np.array(
             [[np.exp(-0.5j * theta), 0], [0, np.exp(0.5j * theta)]],
@@ -99,6 +114,25 @@ def _gate_derivative(gate: str, theta: float):
     sine = np.sin(theta / 2)
     if gate == "RY":
         return 0.5 * np.array([[-sine, -cosine], [cosine, -sine]], dtype=complex)
+    if gate == "RX":
+        return 0.5 * np.array(
+            [[-sine, -1j * cosine], [-1j * cosine, -sine]],
+            dtype=complex,
+        )
+    if gate in {"PAPER_G", "PAPER_G_ACTIVE"}:
+        ry_plus = _gate_matrix("RY", theta)
+        ry_minus = _gate_matrix("RY", -theta)
+        dry_plus = _gate_derivative("RY", theta)
+        dry_minus = -_gate_derivative("RY", -theta)
+        if gate == "PAPER_G":
+            identity = np.eye(2, dtype=complex)
+            cx_gate = _gate_matrix("CX")
+            return (
+                np.kron(identity, dry_plus) @ cx_gate @ np.kron(identity, ry_minus)
+                + np.kron(identity, ry_plus) @ cx_gate @ np.kron(identity, dry_minus)
+            )
+        x_gate = np.array([[0, 1], [1, 0]], dtype=complex)
+        return dry_plus @ x_gate @ ry_minus + ry_plus @ x_gate @ dry_minus
     if gate == "RZ":
         return np.array(
             [

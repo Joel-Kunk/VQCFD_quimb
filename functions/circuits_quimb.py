@@ -1,15 +1,101 @@
 import numpy as np
+from autoray import do
 import quimb.tensor as qtn
+import quimb.tensor.circuit as qtn_circuit
+
+
+_PAPER_CX_ARRAY = np.asarray(qtn_circuit.CONSTANT_GATES["CX"])
+_PAPER_X_ARRAY = np.asarray(qtn_circuit.CONSTANT_GATES["X"])
+
+
+def _kron_all(arrays):
+    result = arrays[0]
+    for array in arrays[1:]:
+        result = do("kron", result, array)
+    return result
+
+
+def _paper_g_dense(params):
+    """Return G(i,j) = RY_j(theta) CX(i,j) RY_j(-theta)."""
+    theta = params[0]
+    identity = qtn_circuit.PARAM_GATES["RY"]((theta * 0.0,))
+    ry_minus = qtn_circuit.PARAM_GATES["RY"]((-theta,))
+    ry_plus = qtn_circuit.PARAM_GATES["RY"]((theta,))
+    before = _kron_all((identity, ry_minus))
+    after = _kron_all((identity, ry_plus))
+    return do(
+        "matmul",
+        after,
+        do("matmul", _PAPER_CX_ARRAY, before),
+    )
+
+
+def _paper_g_dense_dagger(params):
+    unitary = _paper_g_dense(params)
+    return do("transpose", do("conj", unitary))
+
+
+def _paper_g_active_dense(params):
+    """Return the data-only action of G(a,j) when the ancilla is |1>."""
+    theta = params[0]
+    ry_minus = qtn_circuit.PARAM_GATES["RY"]((-theta,))
+    ry_plus = qtn_circuit.PARAM_GATES["RY"]((theta,))
+    return do(
+        "matmul",
+        ry_plus,
+        do("matmul", _PAPER_X_ARRAY, ry_minus),
+    )
+
+
+def _paper_g_active_dense_dagger(params):
+    unitary = _paper_g_active_dense(params)
+    return do("transpose", do("conj", unitary))
+
+
+def _paper_g_gate(params):
+    return do("reshape", _paper_g_dense(params), (2,) * 4)
+
+
+def _paper_g_dagger_gate(params):
+    return do("reshape", _paper_g_dense_dagger(params), (2,) * 4)
+
+
+def _paper_g_active_gate(params):
+    return do("reshape", _paper_g_active_dense(params), (2,) * 2)
+
+
+def _paper_g_active_dagger_gate(params):
+    return do("reshape", _paper_g_active_dense_dagger(params), (2,) * 2)
+
+
+def _register_paper_viscid_gates() -> None:
+    gates = {
+        "PAPER_G": (2, _paper_g_gate),
+        "PAPER_G_DAG": (2, _paper_g_dagger_gate),
+        "PAPER_G_ACTIVE": (1, _paper_g_active_gate),
+        "PAPER_G_ACTIVE_DAG": (1, _paper_g_active_dagger_gate),
+    }
+    for label, (size, generator) in gates.items():
+        qtn_circuit.ALL_GATES.add(label)
+        qtn_circuit.GATE_SIZE[label] = size
+        qtn_circuit.GATE_TAGS[label] = label
+        qtn_circuit.PARAM_GATES[label] = generator
+
+
+_register_paper_viscid_gates()
 
 
 DEFAULT_UNITARY_CIRCUIT = "default"
 UNITARY_CIRCUITS = (
     DEFAULT_UNITARY_CIRCUIT,
+    "default_rzrxrz",
     "uni2",
+    "paper_viscid",
     "brickwork_ring_ry",
     "ring_ry_rz",
     "ring_trainable_crx",
     "multiscale_tree",
+    "multiscale_tree_rzrxrz",
     "local_ry_rz",
     "ghz_orbit",
     "ring_trainable_crz",
@@ -29,6 +115,11 @@ def resolve_unitary_circuit(unitary_circuit: str | None = None) -> str:
         "": DEFAULT_UNITARY_CIRCUIT,
         "current": DEFAULT_UNITARY_CIRCUIT,
         "line_ry": DEFAULT_UNITARY_CIRCUIT,
+        "default_zxz": "default_rzrxrz",
+        "fig2_paper": "paper_viscid",
+        "paper": "paper_viscid",
+        "paper_fig2": "paper_viscid",
+        "tree_zxz": "multiscale_tree_rzrxrz",
     }
     name = aliases.get(name, name)
     if name not in UNITARY_CIRCUITS:
@@ -113,6 +204,13 @@ def num_unitary_parameters(
     unitary_circuit: str | None = None,
 ) -> int:
     name = resolve_unitary_circuit(unitary_circuit)
+    if name == "paper_viscid":
+        # Each central layer traverses the data chain forward and backward
+        # with one parameter per G block. The final ancilla-to-q0 G block is
+        # applied once, so N=3 and L=1 gives the paper's five angles.
+        return 2 * max(0, qubits - 1) * layers + 1
+    if name in {"default_rzrxrz", "multiscale_tree_rzrxrz"}:
+        return 3 * qubits * (layers + 1)
     if name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
         return 2 * qubits * (layers + 1)
     if name == "ghz_orbit":
@@ -175,10 +273,33 @@ def _unitary_gate_specs(
         specs.append((gate, qubits, float(p[idx]), True))
         idx += 1
 
+    def add_paper_g(inner_control: int, inner_target: int) -> None:
+        nonlocal idx
+        specs.append(
+            (
+                "PAPER_G",
+                (inner_control, inner_target),
+                float(p[idx]),
+                True,
+            )
+        )
+        idx += 1
+
+    def add_paper_g_active(target: int) -> None:
+        nonlocal idx
+        specs.append(("PAPER_G_ACTIVE", (target,), float(p[idx]), True))
+        idx += 1
+
     def add_euler_block(target: int) -> None:
         """Add a general one-qubit unitary, up to global phase."""
         add_rotation("Z", target)
         add_rotation("Y", target)
+        add_rotation("Z", target)
+
+    def add_zxz_block(target: int) -> None:
+        """Add the requested RZ-RX-RZ Euler replacement for one RY gate."""
+        add_rotation("Z", target)
+        add_rotation("X", target)
         add_rotation("Z", target)
 
     def add_cx(inner_control: int, inner_target: int) -> None:
@@ -223,7 +344,39 @@ def _unitary_gate_specs(
         add_rotation("Y", first)
         add_rotation("Y", second)
 
-    if name in {"mps_staircase", "mps_staircase_light"}:
+    if name == "paper_viscid":
+        # Fig. 5 contains N=3 data qubits plus the Hadamard ancilla. Its
+        # central V is a forward and reverse chain of
+        #   G(i,j) = RY_j(-theta), CX(i,j), RY_j(theta)
+        # blocks. The rotations are ordinary data rotations: only the bare
+        # opening CX(a,q0) and the CNOT inside the closing G(a,q0) touch the
+        # Hadamard ancilla. For L>1 only the central data-only V is repeated,
+        # retaining exactly two ancilla-connected CNOTs in the full ansatz.
+        if control is None:
+            # Pure-state preparation fixes the Hadamard ancilla to |1>, so
+            # the opening CX(a,q0) reduces to X(q0).
+            add_fixed_gate("X", (targets_desc[0],))
+        else:
+            add_fixed_gate("CX", (control, targets_desc[0]))
+
+        forward_edges = list(zip(targets_desc[:-1], targets_desc[1:]))
+        reverse_edges = [
+            (targets_desc[index], targets_desc[index - 1])
+            for index in range(len(targets_desc) - 1, 0, -1)
+        ]
+        for _ in range(layers):
+            for edge in forward_edges:
+                add_paper_g(*edge)
+            for edge in reverse_edges:
+                add_paper_g(*edge)
+
+        if control is None:
+            # Pure-state preparation fixes the Hadamard ancilla to |1>. In
+            # that branch G(a,q0) reduces to RY(theta) X RY(-theta) on q0.
+            add_paper_g_active(targets_desc[0])
+        else:
+            add_paper_g(control, targets_desc[0])
+    elif name in {"mps_staircase", "mps_staircase_light"}:
         for _ in range(layers):
             for first, second in zip(targets_desc[:-1], targets_desc[1:]):
                 if name == "mps_staircase":
@@ -253,7 +406,10 @@ def _unitary_gate_specs(
                 add_rotation("Z", target)
     else:
         for layer in range(layers):
-            if name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
+            if name in {"default_rzrxrz", "multiscale_tree_rzrxrz"}:
+                for target in targets_desc:
+                    add_zxz_block(target)
+            elif name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
                 for target in targets_desc:
                     add_rotation("Y", target)
                     add_rotation("Z", target)
@@ -261,7 +417,7 @@ def _unitary_gate_specs(
                 for target in targets_desc:
                     add_rotation("Y", target)
 
-            if name == "default":
+            if name in {"default", "default_rzrxrz"}:
                 for edge in zip(targets_desc[:-1], targets_desc[1:]):
                     add_fixed_gate("CX", edge)
             elif name == "uni2":
@@ -276,7 +432,7 @@ def _unitary_gate_specs(
             elif name == "ring_trainable_crz":
                 for edge in _ring_edges(targets_desc):
                     add_parameterized_gate("CRZ", edge)
-            elif name == "multiscale_tree":
+            elif name in {"multiscale_tree", "multiscale_tree_rzrxrz"}:
                 for edge in _tree_edges(targets_desc):
                     add_fixed_gate("CX", edge)
             elif name == "all_to_all_crx":
@@ -288,7 +444,10 @@ def _unitary_gate_specs(
             elif name != "local_ry_rz":
                 raise RuntimeError(f"Unhandled circuit family: {name!r}.")
 
-        if name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
+        if name in {"default_rzrxrz", "multiscale_tree_rzrxrz"}:
+            for target in targets_desc:
+                add_zxz_block(target)
+        elif name in {"uni2", "ring_ry_rz", "local_ry_rz"}:
             for target in targets_desc:
                 add_rotation("Y", target)
                 add_rotation("Z", target)
@@ -305,11 +464,16 @@ def _apply_specs(circ: qtn.Circuit, specs, inverse: bool = False, parametrize: b
     seq = reversed(specs) if inverse else specs
     for gate, qubits, param, trainable in seq:
         if param is not None:
-            theta = -param if inverse else param
+            if gate in {"PAPER_G", "PAPER_G_ACTIVE"}:
+                if inverse:
+                    gate = f"{gate}_DAG"
+                gate_params = (param,)
+            else:
+                gate_params = (-param,) if inverse else (param,)
             circ.apply_gate(
                 gate,
                 qubits=qubits,
-                params=(theta,),
+                params=gate_params,
                 parametrize=parametrize and trainable,
             )
         else:
@@ -449,7 +613,10 @@ def _apply_diagonal_inverse(
     right_data = list(range(n, 0, -1))
     left_data = list(range(3 * n - 2, 2 * n - 2, -1))
 
-    # Inverse of D = U_prev(left_data, ancilla) followed by diagonal CCX chain.
+    # Inverse of D = U_prev(left_data, ancilla) followed by the diagonal CNOT
+    # chain. The CNOTs only couple corresponding data-register qubits. On the
+    # inactive Hadamard branch both registers enter as |0>, so these fixed
+    # gates act trivially and do not need an additional ancilla control.
     _apply_unitary_on_register(
         circ,
         control=anc,
@@ -462,7 +629,7 @@ def _apply_diagonal_inverse(
     )
 
     for i in range(n):
-        circ.apply_gate("CCX", qubits=(anc, right_data[i], left_data[i]))
+        circ.apply_gate("CX", qubits=(right_data[i], left_data[i]))
 
 
 def make_inverse_reference_circuits(
@@ -512,6 +679,11 @@ def unitary_gate_count(
     layers: int,
     unitary_circuit: str | None = None,
 ) -> int:
+    if resolve_unitary_circuit(unitary_circuit) == "paper_viscid":
+        # The internal G composites each represent two RY gates and one CNOT.
+        # There is one additional opening CNOT connected to the ancilla.
+        num_unitary_parameters(qubits, layers, unitary_circuit)
+        return 6 * max(0, qubits - 1) * layers + 4
     n_params = num_unitary_parameters(qubits, layers, unitary_circuit)
     specs = _unitary_gate_specs(
         control=0,
