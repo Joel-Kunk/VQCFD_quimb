@@ -14,8 +14,9 @@ def plot_initialfit(
     Label,
     FIG_DIR,
     unitary_circuit=None,
+    figsize=None,
 ):
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=figsize)
     ax.plot(Xs,MOD_init*PSI_init,label="Initial desired state")
     u_temp =[]
     psi_temp = fqu.make_state_circuit(
@@ -40,8 +41,19 @@ def plot_initialfit(
     plt.close(fig)
     return value
 
-def plot_final(Xs,U,params,N,L,N_total,Label,FIG_DIR,unitary_circuit=None):
-    fig, ax = plt.subplots()
+def plot_final(
+    Xs,
+    U,
+    params,
+    N,
+    L,
+    N_total,
+    Label,
+    FIG_DIR,
+    unitary_circuit=None,
+    figsize=None,
+):
+    fig, ax = plt.subplots(figsize=figsize)
     ax.plot(Xs,U,label="Classical result")
     u_temp =[]
     psi_temp = fqu.make_state_circuit(N, L, params[1:], unitary_circuit).to_dense()
@@ -62,9 +74,9 @@ def plot_final(Xs,U,params,N,L,N_total,Label,FIG_DIR,unitary_circuit=None):
     fig.savefig(FIG_DIR / f"Final_State_{Label}.pdf", bbox_inches="tight")
     plt.close(fig)
 
-def plot_unitary(N,L,FIG_DIR,unitary_circuit=None):
+def plot_unitary(N,L,FIG_DIR,unitary_circuit=None,figsize=None):
     circuit_name = fcq.resolve_unitary_circuit(unitary_circuit)
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=figsize)
     ax.axis("off")
     ax.text(
         0.02,
@@ -77,8 +89,18 @@ def plot_unitary(N,L,FIG_DIR,unitary_circuit=None):
     fig.savefig(FIG_DIR / "circuit.pdf", bbox_inches="tight")
     plt.close(fig)
 
-def plot_evolution(Xs,params,N,L,N_total,Label,FIG_DIR,unitary_circuit=None):
-    fig,ax = plt.subplots()
+def plot_evolution(
+    Xs,
+    params,
+    N,
+    L,
+    N_total,
+    Label,
+    FIG_DIR,
+    unitary_circuit=None,
+    figsize=None,
+):
+    fig,ax = plt.subplots(figsize=figsize)
 
     for i in range(len(params)):
         u_temp =[]
@@ -97,8 +119,8 @@ def plot_evolution(Xs,params,N,L,N_total,Label,FIG_DIR,unitary_circuit=None):
     plt.close(fig)
 
 
-def plot_calssical_evolution(Xs,U,Label,FIG_DIR):
-    fig,ax = plt.subplots()
+def plot_calssical_evolution(Xs,U,Label,FIG_DIR,figsize=None):
+    fig,ax = plt.subplots(figsize=figsize)
     for i in range(len(U[1,:])):
         ax.plot(Xs,U[:,i])
 

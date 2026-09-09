@@ -72,9 +72,9 @@ def main() -> None:
 
     # Common options applied to every run.
     common = dict(
-        mode="exp_only",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
+        mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
         # `exp_only` always computes both metrics; this flag is for full runs.
-        compute_expr_cap=False,
+        compute_expr_cap=True,
         # Search each fixed contraction topology thoroughly once, persist the
         # best exact path, and reuse it for every optimization/time step. (Better to not use, only worth it for large TNs, but prone to bugs there)
         optimize_contraction_paths=False,
@@ -83,7 +83,7 @@ def main() -> None:
         contraction_path_seed=0,
         contraction_path_reuse_saved=True,
         # Use one name/None, or a list to sweep over multiple circuits.
-        unitary_circuit= ["paper_viscid","default_rzrxrz","multiscale_tree_rzrxrz"],#["mps_staircase_light","mps_staircase"],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
+        unitary_circuit= ["paper_viscid"],#["all_to_all_crx","block_crx","ring_trainable_crz","ghz_orbit","local_ry_rz"],
         # Options: "default_rzrxrz", "uni2", "paper_viscid" (the paper's
         # ancilla-ended G-block V, scalable to every N),
         # "brickwork_ring_ry", "ring_ry_rz", "ring_trainable_crx",
@@ -123,8 +123,8 @@ def main() -> None:
             (5, 2),
         ]
     elif run_mode == "grid":
-        ns = [2.3,4,5]
-        ls = [1,2,3,4,5]
+        ns = [6]
+        ls = [3]
         base_todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")

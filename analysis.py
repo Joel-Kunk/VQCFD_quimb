@@ -583,43 +583,163 @@ def optimization_step_summary(run: RunData) -> dict[str, float | int]:
     }
 
 
-def normalize_cost_trace(trace: np.ndarray) -> np.ndarray:
+def normalize_cost_trace(
+    trace: np.ndarray,
+    method: str = "start_end",
+) -> np.ndarray:
+    """Normalize one cost trace while preserving any masked (NaN) samples.
+
+    ``start_end`` maps the first finite value to one and the final finite value
+    to zero. ``initial`` divides by the first finite value, ``minmax`` maps the
+    finite range to zero--one, and ``zscore`` uses the finite mean and standard
+    deviation.
+    """
     trace = np.asarray(trace, dtype=float).ravel()
     if trace.size == 0:
         return trace
-    denominator = trace[0] - trace[-1]
+    method = str(method).strip().lower()
+    if method not in {"start_end", "initial", "minmax", "zscore"}:
+        raise ValueError(
+            "normalization_method must be 'start_end', 'initial', "
+            "'minmax', or 'zscore'."
+        )
+    finite_values = trace[np.isfinite(trace)]
+    if finite_values.size == 0:
+        return trace.copy()
+    if method == "start_end":
+        offset = finite_values[-1]
+        denominator = finite_values[0] - offset
+    elif method == "initial":
+        offset = 0.0
+        denominator = finite_values[0]
+    elif method == "minmax":
+        offset = float(np.min(finite_values))
+        denominator = float(np.max(finite_values) - offset)
+    else:
+        offset = float(np.mean(finite_values))
+        denominator = float(np.std(finite_values))
     if abs(denominator) < 1e-15:
-        return np.zeros_like(trace)
-    return (trace - trace[-1]) / denominator
+        result = np.zeros_like(trace)
+        result[~np.isfinite(trace)] = np.nan
+        return result
+    return (trace - offset) / denominator
 
 
 def mask_outliers(
     trace: np.ndarray,
     method: str = "iqr",
-    factor: float = 3.0,
+    factor: float = 1.5,
     percentiles: tuple[float, float] = (1.0, 99.0),
+    action: str = "mask",
 ) -> np.ndarray:
+    """Mask or clip per-trace outliers using IQR or percentile thresholds."""
     values = np.asarray(trace, dtype=float).copy()
+    method = str(method).strip().lower()
+    if method not in {"iqr", "percentile"}:
+        raise ValueError("method must be 'iqr' or 'percentile'")
+    action = str(action).strip().lower()
+    if action not in {"mask", "clip"}:
+        raise ValueError("outlier_action must be 'mask' or 'clip'.")
+    if method == "iqr" and factor < 0:
+        raise ValueError("outlier_factor must be non-negative.")
+    if method == "percentile":
+        if len(percentiles) != 2:
+            raise ValueError("outlier_percentiles must contain two values.")
+        percentile_low, percentile_high = map(float, percentiles)
+        if not 0 <= percentile_low < percentile_high <= 100:
+            raise ValueError(
+                "outlier_percentiles must satisfy 0 <= low < high <= 100."
+            )
     finite = np.isfinite(values)
     if finite.sum() < 4:
         return values
     finite_values = values[finite]
     if method == "percentile":
-        low, high = np.percentile(finite_values, percentiles)
-    elif method == "iqr":
+        low, high = np.percentile(
+            finite_values,
+            [percentile_low, percentile_high],
+        )
+    else:
         q1, q3 = np.percentile(finite_values, [25, 75])
         iqr = q3 - q1
         if iqr < 1e-15:
-            return values
-        low, high = q1 - factor * iqr, q3 + factor * iqr
+            low, high = q1, q3
+        else:
+            low, high = q1 - factor * iqr, q3 + factor * iqr
+    if action == "mask":
+        values[finite & ((values < low) | (values > high))] = np.nan
     else:
-        raise ValueError("method must be 'iqr' or 'percentile'")
-    values[finite & ((values < low) | (values > high))] = np.nan
+        values[finite] = np.clip(values[finite], low, high)
     return values
 
 
-def plot_costs_and_times(run: RunData):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+def smooth_cost_trace(
+    trace: np.ndarray,
+    window: int,
+    method: str = "median",
+    centered: bool = True,
+) -> np.ndarray:
+    """Apply an opt-in rolling mean or median to one cost trace."""
+    if isinstance(window, (bool, np.bool_)) or not isinstance(
+        window, (int, np.integer)
+    ):
+        raise TypeError("smoothing_window must be an integer or None.")
+    if window < 1:
+        raise ValueError("smoothing_window must be at least one.")
+    method = str(method).strip().lower()
+    if method not in {"mean", "median"}:
+        raise ValueError("smoothing_method must be 'mean' or 'median'.")
+    rolling = pd.Series(np.asarray(trace, dtype=float).ravel()).rolling(
+        window=int(window),
+        center=bool(centered),
+        min_periods=1,
+    )
+    smoothed = rolling.mean() if method == "mean" else rolling.median()
+    return smoothed.to_numpy(dtype=float)
+
+
+def running_best_cost_trace(trace: np.ndarray) -> np.ndarray:
+    """Return the best-so-far cost for a minimization, preserving NaN gaps."""
+    values = np.asarray(trace, dtype=float).ravel()
+    result = np.full_like(values, np.nan)
+    best = np.inf
+    for index, value in enumerate(values):
+        if np.isfinite(value):
+            best = min(best, value)
+            result[index] = best
+    return result
+
+
+def _coerce_iteration_slice(
+    iteration_slice: slice | tuple[int | None, ...] | None,
+) -> slice:
+    if iteration_slice is None:
+        return slice(None)
+    if isinstance(iteration_slice, slice):
+        selected = iteration_slice
+    elif isinstance(iteration_slice, tuple) and len(iteration_slice) in {2, 3}:
+        selected = slice(*iteration_slice)
+    else:
+        raise TypeError(
+            "iteration_slice must be None, a slice, or a (start, stop[, step]) "
+            "tuple."
+        )
+    for boundary in (selected.start, selected.stop, selected.step):
+        if boundary is not None and (
+            isinstance(boundary, (bool, np.bool_))
+            or not isinstance(boundary, (int, np.integer))
+        ):
+            raise TypeError("iteration_slice values must be integers or None.")
+    if selected.step == 0:
+        raise ValueError("iteration_slice step cannot be zero.")
+    return selected
+
+
+def plot_costs_and_times(
+    run: RunData,
+    figsize: tuple[float, float] | None = None,
+):
+    fig, axes = plt.subplots(1, 2, figsize=figsize or (12, 4))
     for ax, values, title, ylabel in (
         (axes[0], run.costs, "Final cost per timestep", "cost"),
         (axes[1], run.times, "Runtime per timestep", "seconds"),
@@ -637,40 +757,262 @@ def plot_costs_and_times(run: RunData):
 
 def plot_cost_histories(
     run: RunData,
-    normalize: bool = True,
-    remove_outliers: bool = True,
+    normalize: bool = False,
+    remove_outliers: bool = False,
     outlier_method: str = "iqr",
-    outlier_factor: float = 3.0,
+    outlier_factor: float = 1.5,
     outlier_percentiles: tuple[float, float] = (1.0, 99.0),
     show_first_n_labels: int = 10,
+    timesteps: int | Iterable[int] | None = None,
+    alpha: float = 0.55,
+    kind: str = "line",
+    log_y: bool = False,
+    ax=None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    title: str | None = None,
+    x_limits: tuple[float | None, float | None] | None = None,
+    y_limits: tuple[float | None, float | None] | None = None,
+    series_labels: str | Sequence[str] | None = None,
+    figsize: tuple[float, float] | None = None,
+    iteration_slice: slice | tuple[int | None, ...] | None = None,
+    normalization_method: str = "start_end",
+    outlier_action: str = "mask",
+    smoothing_window: int | None = None,
+    smoothing_method: str = "median",
+    smoothing_centered: bool = True,
+    running_best: bool = False,
+    y_percentile_limits: tuple[float, float] | None = None,
+    show_final_error_metrics: bool = False,
 ):
+    """Plot optimizer cost evaluations for selected evolved timesteps.
+
+    ``timesteps`` accepts one saved timestep index, an iterable of indices, or
+    ``None`` for every available trace. Negative values select from the end of
+    the sorted saved timesteps, so ``-1`` selects the final optimization step.
+
+    All data transformations are opt-in. Their order is iteration slicing,
+    outlier masking/clipping, best-so-far conversion, normalization, and
+    rolling smoothing. ``y_percentile_limits`` changes only the visible y-axis
+    range; it does not alter the plotted data. Set
+    ``show_final_error_metrics=True`` to annotate the final saved state's
+    target and encoded-initial relative L2 errors in the upper-right corner.
+    """
     histories = load_per_timestep_histories(run, "cost_iter")
     if not histories:
         print("No cost_iter files found for this run.")
         return None
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for timestep, values in histories:
-        y = np.asarray(values, dtype=float).ravel()
-        if normalize:
-            y = normalize_cost_trace(y)
+
+    available = {timestep: values for timestep, values in histories}
+    available_timesteps = list(available)
+    if timesteps is None:
+        selected_timesteps = available_timesteps
+    else:
+        if isinstance(timesteps, (int, np.integer)):
+            requested = [timesteps]
+        else:
+            try:
+                requested = list(timesteps)
+            except TypeError as exc:
+                raise TypeError(
+                    "timesteps must be an integer, an iterable of integers, "
+                    "or None."
+                ) from exc
+        if not requested:
+            raise ValueError("timesteps must contain at least one index.")
+        selected_timesteps = []
+        for timestep in requested:
+            if isinstance(timestep, (bool, np.bool_)) or not isinstance(
+                timestep, (int, np.integer)
+            ):
+                raise TypeError("Every timestep must be an integer.")
+            resolved = int(timestep)
+            if resolved < 0:
+                try:
+                    resolved = available_timesteps[resolved]
+                except IndexError as exc:
+                    raise IndexError(
+                        f"Timestep {timestep} is out of range for the "
+                        f"{len(available_timesteps)} saved histories."
+                    ) from exc
+            if resolved not in available:
+                raise KeyError(
+                    f"No cost history was saved for timestep {resolved}. "
+                    f"Available timesteps: {available_timesteps}."
+                )
+            if resolved not in selected_timesteps:
+                selected_timesteps.append(resolved)
+
+    if kind not in {"line", "scatter"}:
+        raise ValueError("kind must be 'line' or 'scatter'")
+    if not 0 <= alpha <= 1:
+        raise ValueError("alpha must be between 0 and 1.")
+    if isinstance(show_first_n_labels, (bool, np.bool_)) or not isinstance(
+        show_first_n_labels, (int, np.integer)
+    ):
+        raise TypeError("show_first_n_labels must be an integer.")
+    if show_first_n_labels < 0:
+        raise ValueError("show_first_n_labels must be non-negative.")
+    selected_iterations = _coerce_iteration_slice(iteration_slice)
+    if y_limits is not None and y_percentile_limits is not None:
+        raise ValueError(
+            "Use either y_limits or y_percentile_limits, not both."
+        )
+    if y_percentile_limits is not None:
+        if len(y_percentile_limits) != 2:
+            raise ValueError("y_percentile_limits must contain two values.")
+        percentile_low, percentile_high = map(float, y_percentile_limits)
+        if not 0 <= percentile_low < percentile_high <= 100:
+            raise ValueError(
+                "y_percentile_limits must satisfy 0 <= low < high <= 100."
+            )
+
+    if series_labels is None:
+        custom_series_labels = None
+    elif isinstance(series_labels, str):
+        if len(selected_timesteps) != 1:
+            raise ValueError(
+                "A single series label can only be used when exactly one "
+                f"timestep is plotted ({len(selected_timesteps)} found)."
+            )
+        custom_series_labels = [series_labels]
+    else:
+        try:
+            custom_series_labels = [str(label) for label in series_labels]
+        except TypeError as exc:
+            raise TypeError(
+                "series_labels must be None, a string, or a sequence of "
+                "strings."
+            ) from exc
+        if len(custom_series_labels) != len(selected_timesteps):
+            raise ValueError(
+                "series_labels must have one entry for each plotted timestep "
+                f"({len(selected_timesteps)} expected, "
+                f"{len(custom_series_labels)} received)."
+            )
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize or (10, 5))
+    else:
+        fig = ax.figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
+
+    processed_traces = []
+    for timestep in selected_timesteps:
+        y = np.asarray(available[timestep], dtype=float).ravel()
+        x = np.arange(y.size)[selected_iterations]
+        y = y[selected_iterations]
+        if y.size == 0:
+            raise ValueError(
+                f"iteration_slice selects no cost evaluations for timestep "
+                f"{timestep}."
+            )
         if remove_outliers:
-            y = mask_outliers(y, outlier_method, outlier_factor, outlier_percentiles)
-        label = f"t={timestep}" if timestep < show_first_n_labels else None
-        ax.plot(y, alpha=0.55, label=label)
-    ax.set_title(f"cost_iter traces ({run.full_label})")
-    ax.set_xlabel("optimizer iteration")
-    ax.set_ylabel("relative cost (1=start, 0=end)" if normalize else "cost")
-    if show_first_n_labels > 0:
+            y = mask_outliers(
+                y,
+                method=outlier_method,
+                factor=outlier_factor,
+                percentiles=outlier_percentiles,
+                action=outlier_action,
+            )
+        if running_best:
+            y = running_best_cost_trace(y)
+        if normalize:
+            y = normalize_cost_trace(y, method=normalization_method)
+        if smoothing_window is not None:
+            y = smooth_cost_trace(
+                y,
+                window=smoothing_window,
+                method=smoothing_method,
+                centered=smoothing_centered,
+            )
+        processed_traces.append((timestep, x, y))
+
+    for series_index, (timestep, x, y) in enumerate(processed_traces):
+        label = (
+            custom_series_labels[series_index]
+            if custom_series_labels is not None
+            else f"timestep={timestep}"
+            if series_index < show_first_n_labels
+            else None
+        )
+        if kind == "scatter":
+            ax.scatter(x, y, alpha=alpha, label=label)
+        else:
+            ax.plot(x, y, alpha=alpha, label=label)
+
+    ax.set_title(
+        f"Cost evolution ({run.full_label})" if title is None else title
+    )
+    ax.set_xlabel("optimizer iteration" if x_label is None else x_label)
+    normalized_labels = {
+        "start_end": "normalized cost (1=start, 0=end)",
+        "initial": "cost / initial cost",
+        "minmax": "min-max normalized cost",
+        "zscore": "cost z-score",
+    }
+    default_y_label = (
+        normalized_labels[str(normalization_method).strip().lower()]
+        if normalize
+        else "cost"
+    )
+    ax.set_ylabel(default_y_label if y_label is None else y_label)
+    if log_y:
+        ax.set_yscale("log")
+    if x_limits is not None:
+        ax.set_xlim(*x_limits)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    elif y_percentile_limits is not None:
+        visible_values = np.concatenate(
+            [values[np.isfinite(values)] for _, _, values in processed_traces]
+        )
+        if log_y:
+            visible_values = visible_values[visible_values > 0]
+        if visible_values.size == 0:
+            raise ValueError(
+                "No finite values are available for y_percentile_limits."
+            )
+        low, high = np.percentile(
+            visible_values,
+            [percentile_low, percentile_high],
+        )
+        if np.isclose(low, high):
+            padding = max(abs(float(low)) * 0.05, 1e-12)
+            low, high = low - padding, high + padding
+        ax.set_ylim(float(low), float(high))
+    if custom_series_labels is not None or show_first_n_labels > 0:
         ax.legend(ncol=2, fontsize=8)
+    if show_final_error_metrics:
+        final_comparison = compare_run_timestep(run, timestep=-1)
+        metric_text = (
+            f"Target L2 err = {final_comparison['RelativeL2Error']:.2e}\n"
+            "Encoded L2 err = "
+            f"{final_comparison['EvolutionRelativeL2Error']:.2e}"
+        )
+        ax.text(
+            0.98,
+            0.98,
+            metric_text,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+        )
     return fig, ax
 
 
-def plot_parameter_history(run: RunData, parameter_index: int = 0):
+def plot_parameter_history(
+    run: RunData,
+    parameter_index: int = 0,
+    figsize: tuple[float, float] | None = None,
+):
     params = run.params
     if params is None:
         print("No params file found for this run.")
         return None
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=figsize or (9, 4))
     ax.plot(params[:, parameter_index], marker="o", ms=3)
     ax.set_title(f"Parameter[{parameter_index}] across timesteps ({run.full_label})")
     ax.set_xlabel("timestep state index")
@@ -678,13 +1020,16 @@ def plot_parameter_history(run: RunData, parameter_index: int = 0):
     return fig, ax
 
 
-def plot_shots(run: RunData):
+def plot_shots(
+    run: RunData,
+    figsize: tuple[float, float] | None = None,
+):
     shots = run.values.get("shots_used_per_timestep")
     print("shots_used_total:", run.values.get("shots_used_total"))
     if shots is None:
         print("No shots_used_per_timestep metadata found for this run.")
         return None
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=figsize or (9, 4))
     ax.plot(shots, marker="o", ms=3)
     ax.set_title(f"Shots used per timestep ({run.full_label})")
     ax.set_xlabel("timestep")
@@ -699,6 +1044,7 @@ def plot_expr_entcap_vs_l(
     group_by_n: bool = True,
     use_log_y: bool = False,
     n_filter: int | Iterable[int] | None = None,
+    figsize: tuple[float, float] | None = None,
 ):
     if not show_expressibility and not show_entangling_capability:
         raise ValueError("At least one metric must be selected.")
@@ -725,7 +1071,12 @@ def plot_expr_entcap_vs_l(
         metrics.append(("expressibility", "Expressibility vs L"))
     if show_entangling_capability:
         metrics.append(("entangling_capability", "Entangling Capability vs L"))
-    fig, axes = plt.subplots(1, len(metrics), figsize=(6 * len(metrics), 4), squeeze=False)
+    fig, axes = plt.subplots(
+        1,
+        len(metrics),
+        figsize=figsize or (6 * len(metrics), 4),
+        squeeze=False,
+    )
     for ax, (metric, title) in zip(axes[0], metrics):
         available = [row for row in rows if row[metric] is not None]
         if not available:
@@ -966,12 +1317,19 @@ def compare_run_timestep(run: RunData, timestep: int = -1) -> dict[str, Any]:
     }
 
 
-def plot_run_timestep_comparison(run: RunData, timestep: int = -1, ax=None):
+def plot_run_timestep_comparison(
+    run: RunData,
+    timestep: int = -1,
+    ax=None,
+    figsize: tuple[float, float] | None = None,
+):
     comparison = compare_run_timestep(run, timestep)
     if ax is None:
-        fig, ax = plt.subplots(figsize=(6, 4))
+        fig, ax = plt.subplots(figsize=figsize or (6, 4))
     else:
         fig = ax.figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
     ax.plot(comparison["x"], comparison["classical"], label="Target classical", linewidth=2)
     ax.plot(
         comparison["x"],
@@ -1007,6 +1365,7 @@ def plot_run_time_evolution(
     timestep_stride: int = 1,
     cmap: str = "viridis",
     ax=None,
+    figsize: tuple[float, float] | None = None,
 ):
     """Plot all classical fields, quantum fields, or both on one set of axes."""
     fields = str(fields).strip().lower()
@@ -1032,9 +1391,11 @@ def plot_run_time_evolution(
     color_map = plt.get_cmap(cmap)
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 7))
+        fig, ax = plt.subplots(figsize=figsize or (10, 7))
     else:
         fig = ax.figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
 
     def plot_trajectory(values, times, linestyle, alpha):
         for index in range(0, values.shape[1], int(timestep_stride)):
@@ -1155,16 +1516,24 @@ def plot_evolution_error_diagnostics(
     run: RunData,
     log_error_y: bool = True,
     axes=None,
+    figsize: tuple[float, float] | None = None,
 ):
     """Plot trajectory-level error magnitudes and their vector alignment."""
     diagnostics = evolution_error_diagnostics(run)
     if axes is None:
-        fig, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+        fig, axes = plt.subplots(
+            3,
+            1,
+            figsize=figsize or (10, 10),
+            sharex=True,
+        )
     else:
         axes = np.asarray(axes, dtype=object).reshape(-1)
         if axes.size != 3:
             raise ValueError("axes must contain exactly three Matplotlib axes.")
         fig = axes[0].figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
 
     time = diagnostics["Time"]
 
@@ -1241,16 +1610,24 @@ def plot_final_error_diagnostics(
     run: RunData,
     timestep: int = -1,
     axes=None,
+    figsize: tuple[float, float] | None = None,
 ):
     """Plot the three reference fields and their signed residuals."""
     comparison = compare_run_timestep(run, timestep=timestep)
     if axes is None:
-        fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        fig, axes = plt.subplots(
+            2,
+            1,
+            figsize=figsize or (10, 8),
+            sharex=True,
+        )
     else:
         axes = np.asarray(axes, dtype=object).reshape(-1)
         if axes.size != 2:
             raise ValueError("axes must contain exactly two Matplotlib axes.")
         fig = axes[0].figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
 
     x = comparison["x"]
     target = comparison["classical"]
@@ -1644,6 +2021,7 @@ def plot_run_table(
     y_limits: tuple[float | None, float | None] | None = None,
     filters: Mapping[str, Any] | None = None,
     series_labels: str | Sequence[str] | None = None,
+    figsize: tuple[float, float] | None = None,
 ):
     """Plot table columns with configurable filters, labels, and grouping.
 
@@ -1686,9 +2064,11 @@ def plot_run_table(
     if kind not in {"line", "scatter"}:
         raise ValueError("kind must be 'line' or 'scatter'")
     if ax is None:
-        fig, ax = plt.subplots(figsize=(9, 5))
+        fig, ax = plt.subplots(figsize=figsize or (6, 4))
     else:
         fig = ax.figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
 
     multiple_y = len(y_columns) > 1
     series_specs = []
@@ -2095,6 +2475,7 @@ def _plot_gradient_table(
     ax,
     x_label: str | None = None,
     y_label: str | None = None,
+    figsize: tuple[float, float] | None = None,
 ):
     y_columns = _gradient_y_columns(y)
     for column in (x, *y_columns):
@@ -2115,7 +2496,11 @@ def _plot_gradient_table(
     if filtered.empty:
         raise ValueError("No rows remain after filtering and dropping missing x/y values.")
     if ax is None:
-        _, ax = plt.subplots(figsize=(9, 5))
+        fig, ax = plt.subplots(figsize=figsize or (9, 5))
+    else:
+        fig = ax.figure
+        if figsize is not None:
+            fig.set_size_inches(figsize)
 
     multiple_y = len(y_columns) > 1
     for y_column in y_columns:
@@ -2152,7 +2537,7 @@ def _plot_gradient_table(
         ax.set_yscale("log")
     if group_columns or multiple_y:
         ax.legend()
-    return filtered, ax, _
+    return filtered, ax, fig
 
 
 def plot_gradient_run_table(
@@ -2170,6 +2555,7 @@ def plot_gradient_run_table(
     ax=None,
     x_label: str | None = None,
     y_label: str | None = None,
+    figsize: tuple[float, float] | None = None,
 ):
     """Plot one or more overall-gradient columns with filters and grouping."""
     filtered = filter_gradient_table(
@@ -2190,6 +2576,7 @@ def plot_gradient_run_table(
         ax,
         x_label=x_label,
         y_label=y_label,
+        figsize=figsize,
     )
 
 
@@ -2277,6 +2664,7 @@ def plot_gradient_parameter_table(
     ax=None,
     x_label: str | None = None,
     y_label: str | None = None,
+    figsize: tuple[float, float] | None = None,
 ):
     """Plot one or more selected scalar-parameter gradient statistics.
 
@@ -2302,6 +2690,7 @@ def plot_gradient_parameter_table(
         ax,
         x_label=x_label,
         y_label=y_label,
+        figsize=figsize,
     )
 
 
@@ -2494,10 +2883,17 @@ def _valid_variance_rows(rows: Sequence[Mapping[str, Any]]):
     return [row for row in rows if row.get("variance") is not None and row.get("n") is not None and row.get("l") is not None]
 
 
-def plot_variance_vs_n(rows: Sequence[Mapping[str, Any]], log_y: bool = True, ax=None):
+def plot_variance_vs_n(
+    rows: Sequence[Mapping[str, Any]],
+    log_y: bool = True,
+    ax=None,
+    figsize: tuple[float, float] | None = None,
+):
     valid = _valid_variance_rows(rows)
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5))
+        _, ax = plt.subplots(figsize=figsize or (10, 5))
+    elif figsize is not None:
+        ax.figure.set_size_inches(figsize)
     by_l = defaultdict(list)
     for row in valid:
         by_l[int(row["l"])].append(row)
@@ -2514,10 +2910,17 @@ def plot_variance_vs_n(rows: Sequence[Mapping[str, Any]], log_y: bool = True, ax
     return ax
 
 
-def plot_variance_vs_l(rows: Sequence[Mapping[str, Any]], log_y: bool = True, ax=None):
+def plot_variance_vs_l(
+    rows: Sequence[Mapping[str, Any]],
+    log_y: bool = True,
+    ax=None,
+    figsize: tuple[float, float] | None = None,
+):
     valid = _valid_variance_rows(rows)
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5))
+        _, ax = plt.subplots(figsize=figsize or (10, 5))
+    elif figsize is not None:
+        ax.figure.set_size_inches(figsize)
     by_n = defaultdict(list)
     for row in valid:
         by_n[int(row["n"])].append(row)
@@ -2534,7 +2937,11 @@ def plot_variance_vs_l(rows: Sequence[Mapping[str, Any]], log_y: bool = True, ax
     return ax
 
 
-def plot_variance_heatmap(rows: Sequence[Mapping[str, Any]], ax=None):
+def plot_variance_heatmap(
+    rows: Sequence[Mapping[str, Any]],
+    ax=None,
+    figsize: tuple[float, float] | None = None,
+):
     valid = _valid_variance_rows(rows)
     if not valid:
         print("No variance rows available.")
@@ -2549,7 +2956,11 @@ def plot_variance_heatmap(rows: Sequence[Mapping[str, Any]], ax=None):
         if variance > 0:
             grid[n_index[int(row["n"])], l_index[int(row["l"])]] = np.log10(variance)
     if ax is None:
-        _, ax = plt.subplots(figsize=(1 + 1.2 * len(ls), 1 + 0.8 * len(ns)))
+        _, ax = plt.subplots(
+            figsize=figsize or (1 + 1.2 * len(ls), 1 + 0.8 * len(ns))
+        )
+    elif figsize is not None:
+        ax.figure.set_size_inches(figsize)
     image = ax.imshow(grid, aspect="auto")
     ax.set_xticks(range(len(ls)), labels=ls)
     ax.set_yticks(range(len(ns)), labels=ns)
