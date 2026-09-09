@@ -1037,6 +1037,11 @@ def plot_shots(
     return fig, ax
 
 
+def _expressibility_score(value: float | None) -> float | None:
+    """Convert the saved KL divergence to a higher-is-better score."""
+    return None if value is None else 1.0 - float(value)
+
+
 def plot_expr_entcap_vs_l(
     runs: Sequence[RunData],
     show_expressibility: bool = True,
@@ -1046,6 +1051,7 @@ def plot_expr_entcap_vs_l(
     n_filter: int | Iterable[int] | None = None,
     figsize: tuple[float, float] | None = None,
 ):
+    """Plot circuit metrics, expressing expressibility as ``1 - D_KL``."""
     if not show_expressibility and not show_entangling_capability:
         raise ValueError("At least one metric must be selected.")
     allowed_n = None if n_filter is None else ({int(n_filter)} if isinstance(n_filter, int) else {int(x) for x in n_filter})
@@ -1058,7 +1064,9 @@ def plot_expr_entcap_vs_l(
                 "run": run,
                 "n": run.n,
                 "l": run.l,
-                "expressibility": run.metadata("expressibility"),
+                "expressibility": _expressibility_score(
+                    run.metadata("expressibility")
+                ),
                 "entangling_capability": run.metadata("entangling_capability"),
             }
         )
@@ -1068,7 +1076,7 @@ def plot_expr_entcap_vs_l(
 
     metrics = []
     if show_expressibility:
-        metrics.append(("expressibility", "Expressibility vs L"))
+        metrics.append(("expressibility", "Expressibility score vs L"))
     if show_entangling_capability:
         metrics.append(("entangling_capability", "Entangling Capability vs L"))
     fig, axes = plt.subplots(
@@ -1093,7 +1101,11 @@ def plot_expr_entcap_vs_l(
                 ax.annotate(row["run"].full_label, (row["l"], float(row[metric])), xytext=(4, 4), textcoords="offset points", fontsize=8)
         ax.set_title(title)
         ax.set_xlabel("L")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(
+            "Expressibility score (1 - KL divergence)"
+            if metric == "expressibility"
+            else metric
+        )
         if use_log_y:
             ax.set_yscale("log")
     fig.tight_layout()
@@ -1859,7 +1871,9 @@ def build_run_records(
     matched exactly by ``(N, L, Circuit, InitialState)``; repeated matching runs
     are combined at the sample level before their variances are calculated.
     Independently saved expression-only runs are matched by ``(N, L, Circuit)``
-    and take priority over metrics embedded in the simulation run.
+    and take priority over metrics embedded in the simulation run. The
+    ``Expressibility`` output is ``1 - D_KL`` so larger values mean a more
+    expressive circuit; saved metadata remains unchanged.
     """
     exact_variance, n_l_variance = _variance_lookup(variance_runs)
     gradient_variances = _gradient_variance_lookup(gradient_runs)
@@ -1914,9 +1928,11 @@ def build_run_records(
                     column: matched_gradient_variances.get(column, np.nan)
                     for column in RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS
                 },
-                "Expressibility": matched_expression_metrics.get(
-                    "Expressibility",
-                    _float_or_nan(run.metadata("expressibility")),
+                "Expressibility": _expressibility_score(
+                    matched_expression_metrics.get(
+                        "Expressibility",
+                        _float_or_nan(run.metadata("expressibility")),
+                    )
                 ),
                 "EntanglingCapability": matched_expression_metrics.get(
                     "EntanglingCapability",
@@ -2121,8 +2137,16 @@ def plot_run_table(
             ax.scatter(group[x], group[y_column], label=label)
         else:
             ax.plot(group[x], group[y_column], marker="o", label=label)
-    ax.set_xlabel(x if x_label is None else x_label)
-    default_y_label = y_columns[0] if not multiple_y else "Value"
+    metric_axis_labels = {
+        "Expressibility": "Expressibility score (1 - KL divergence)",
+    }
+    default_x_label = metric_axis_labels.get(x, x)
+    ax.set_xlabel(default_x_label if x_label is None else x_label)
+    default_y_label = (
+        metric_axis_labels.get(y_columns[0], y_columns[0])
+        if not multiple_y
+        else "Value"
+    )
     ax.set_ylabel(default_y_label if y_label is None else y_label)
     if log_y:
         ax.set_yscale("log")
