@@ -68,13 +68,13 @@ def build_sweep_cfg(n: int, l: int, **overrides) -> SimConfig:
 
 
 def main() -> None:
-    run_mode = "grid"  # "single" | "pairs" | "grid"
+    run_mode = "pairs"  # "single" | "pairs" | "grid"
 
     # Common options applied to every run.
     common = dict(
         mode="noise_free",   # e.g. "noise_free", "adam_exact", "adam_shots", "cobyla_shots", "gradient", "exp_only"
         # `exp_only` always computes both metrics; this flag is for full runs.
-        compute_expr_cap=True,
+        compute_expr_cap=False,
         # Search each fixed contraction topology thoroughly once, persist the
         # best exact path, and reuse it for every optimization/time step. (Better to not use, only worth it for large TNs, but prone to bugs there)
         optimize_contraction_paths=False,
@@ -92,7 +92,7 @@ def main() -> None:
         # "mps_staircase", "mps_staircase_light"
         # Example sweep: [None, "uni2", "multiscale_tree"]
         # Use one name/None, or a list to sweep over multiple initial states.
-        initial_state=None,#[None,"positive_periodic_wave","mixed_sine_modes","tapered_gaussian"],
+        initial_state="tapered_gaussian",#[None,"positive_periodic_wave","mixed_sine_modes","tapered_gaussian"],
         # Options: "positive_hump", "positive_periodic_wave",
         # "mixed_sine_modes", "tapered_gaussian", "tapered_tanh"
         # Example sweep: ["positive_hump", "tapered_gaussian"]
@@ -118,13 +118,13 @@ def main() -> None:
         base_todo = [(3, 4)]
     elif run_mode == "pairs":
         base_todo = [
-            (3, 2),
-            (4, 2),
-            (5, 2),
+            # (4, 3),
+            # (4, 6),
+            (5, 6),
         ]
     elif run_mode == "grid":
-        ns = [6]
-        ls = [3]
+        ns = [4]
+        ls = [6]
         base_todo = [(n, l) for n in ns for l in ls]
     else:
         raise ValueError("run_mode must be one of: 'single', 'pairs', 'grid'")

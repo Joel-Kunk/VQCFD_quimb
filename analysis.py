@@ -735,6 +735,36 @@ def _coerce_iteration_slice(
     return selected
 
 
+def _coerce_excluded_iterations(
+    exclude_iterations: int | Iterable[int] | None,
+) -> tuple[int, ...]:
+    if exclude_iterations is None:
+        return ()
+    if isinstance(exclude_iterations, (int, np.integer)) and not isinstance(
+        exclude_iterations, (bool, np.bool_)
+    ):
+        return (int(exclude_iterations),)
+    if isinstance(exclude_iterations, (str, bytes)):
+        raise TypeError(
+            "exclude_iterations must be an integer, an iterable of integers, "
+            "or None."
+        )
+    try:
+        excluded = list(exclude_iterations)
+    except TypeError as exc:
+        raise TypeError(
+            "exclude_iterations must be an integer, an iterable of integers, "
+            "or None."
+        ) from exc
+    if any(
+        isinstance(iteration, (bool, np.bool_))
+        or not isinstance(iteration, (int, np.integer))
+        for iteration in excluded
+    ):
+        raise TypeError("Every excluded iteration must be an integer.")
+    return tuple(dict.fromkeys(int(iteration) for iteration in excluded))
+
+
 def plot_costs_and_times(
     run: RunData,
     figsize: tuple[float, float] | None = None,
@@ -756,13 +786,13 @@ def plot_costs_and_times(
 
 
 def plot_cost_histories(
-    run: RunData,
+    run: RunData | Sequence[RunData],
     normalize: bool = False,
     remove_outliers: bool = False,
     outlier_method: str = "iqr",
     outlier_factor: float = 1.5,
     outlier_percentiles: tuple[float, float] = (1.0, 99.0),
-    show_first_n_labels: int = 10,
+    show_first_n_labels: int | None = 10,
     timesteps: int | Iterable[int] | None = None,
     alpha: float = 0.55,
     kind: str = "line",
@@ -784,76 +814,165 @@ def plot_cost_histories(
     running_best: bool = False,
     y_percentile_limits: tuple[float, float] | None = None,
     show_final_error_metrics: bool = False,
+    label_by: str = "auto",
+    expressibility_label_precision: int = 4,
+    expression_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
+    exclude_iterations: int | Iterable[int] | None = None,
 ):
-    """Plot optimizer cost evaluations for selected evolved timesteps.
+    """Plot optimizer cost evaluations for one or several runs.
 
     ``timesteps`` accepts one saved timestep index, an iterable of indices, or
-    ``None`` for every available trace. Negative values select from the end of
-    the sorted saved timesteps, so ``-1`` selects the final optimization step.
+    ``None`` for every available trace. The same selection is applied to every
+    run. Negative values select independently from the end of each run's sorted
+    saved timesteps, so ``-1`` selects every run's final optimization step.
+
+    ``label_by`` accepts ``"auto"``, ``"timestep"``, ``"run"``,
+    ``"run_timestep"``, ``"expressibility"``,
+    ``"expressibility_timestep"``, or ``"none"``. Expressibility labels use
+    the saved KL divergence and prefer independently saved expression-only
+    results over metrics embedded in full runs.
+
+    ``exclude_iterations`` removes selected zero-based optimizer-iteration
+    indices while preserving the remaining x coordinates. Thus, excluding
+    iteration ``1`` makes a line connect iteration ``0`` directly to iteration
+    ``2``. Negative indices count from the end of each trace.
 
     All data transformations are opt-in. Their order is iteration slicing,
-    outlier masking/clipping, best-so-far conversion, normalization, and
-    rolling smoothing. ``y_percentile_limits`` changes only the visible y-axis
-    range; it does not alter the plotted data. Set
-    ``show_final_error_metrics=True`` to annotate the final saved state's
+    explicit iteration exclusion, outlier masking/clipping, best-so-far
+    conversion, normalization, and rolling smoothing. ``y_percentile_limits``
+    changes only the visible y-axis range; it does not alter the plotted data. Set
+    ``show_final_error_metrics=True`` to annotate each run's final saved-state
     target and encoded-initial relative L2 errors in the upper-right corner.
     """
-    histories = load_per_timestep_histories(run, "cost_iter")
-    if not histories:
-        print("No cost_iter files found for this run.")
-        return None
-
-    available = {timestep: values for timestep, values in histories}
-    available_timesteps = list(available)
-    if timesteps is None:
-        selected_timesteps = available_timesteps
+    if isinstance(run, RunData):
+        runs = [run]
     else:
-        if isinstance(timesteps, (int, np.integer)):
-            requested = [timesteps]
-        else:
-            try:
-                requested = list(timesteps)
-            except TypeError as exc:
-                raise TypeError(
-                    "timesteps must be an integer, an iterable of integers, "
-                    "or None."
-                ) from exc
-        if not requested:
+        if isinstance(run, (str, bytes)):
+            raise TypeError("run must be a RunData object or a sequence of them.")
+        try:
+            runs = list(run)
+        except TypeError as exc:
+            raise TypeError(
+                "run must be a RunData object or a sequence of them."
+            ) from exc
+        if not runs:
+            raise ValueError("At least one run must be supplied.")
+        if any(not isinstance(current_run, RunData) for current_run in runs):
+            raise TypeError("Every item in run must be a RunData object.")
+
+    if timesteps is None:
+        requested_timesteps = None
+    elif isinstance(timesteps, (int, np.integer)) and not isinstance(
+        timesteps, (bool, np.bool_)
+    ):
+        requested_timesteps = [int(timesteps)]
+    else:
+        try:
+            requested_timesteps = list(timesteps)
+        except TypeError as exc:
+            raise TypeError(
+                "timesteps must be an integer, an iterable of integers, "
+                "or None."
+            ) from exc
+        if not requested_timesteps:
             raise ValueError("timesteps must contain at least one index.")
-        selected_timesteps = []
-        for timestep in requested:
-            if isinstance(timestep, (bool, np.bool_)) or not isinstance(
-                timestep, (int, np.integer)
-            ):
-                raise TypeError("Every timestep must be an integer.")
+        if any(
+            isinstance(timestep, (bool, np.bool_))
+            or not isinstance(timestep, (int, np.integer))
+            for timestep in requested_timesteps
+        ):
+            raise TypeError("Every timestep must be an integer.")
+
+    selected_histories = []
+    selected_counts: dict[str, int] = {}
+    for current_run in runs:
+        histories = load_per_timestep_histories(current_run, "cost_iter")
+        if not histories:
+            if len(runs) == 1:
+                print("No cost_iter files found for this run.")
+                return None
+            raise FileNotFoundError(
+                f"No cost_iter files found for run {current_run.full_label}."
+            )
+        available = {timestep: values for timestep, values in histories}
+        available_timesteps = list(available)
+        selected_timesteps = (
+            available_timesteps
+            if requested_timesteps is None
+            else []
+        )
+        for timestep in requested_timesteps or []:
             resolved = int(timestep)
             if resolved < 0:
                 try:
                     resolved = available_timesteps[resolved]
                 except IndexError as exc:
                     raise IndexError(
-                        f"Timestep {timestep} is out of range for the "
+                        f"Timestep {timestep} is out of range for run "
+                        f"{current_run.full_label}, which has "
                         f"{len(available_timesteps)} saved histories."
                     ) from exc
             if resolved not in available:
                 raise KeyError(
-                    f"No cost history was saved for timestep {resolved}. "
-                    f"Available timesteps: {available_timesteps}."
+                    f"No cost history was saved for timestep {resolved} in "
+                    f"run {current_run.full_label}. Available timesteps: "
+                    f"{available_timesteps}."
                 )
             if resolved not in selected_timesteps:
                 selected_timesteps.append(resolved)
+        selected_counts[current_run.full_label] = len(selected_timesteps)
+        selected_histories.extend(
+            (current_run, timestep, available[timestep])
+            for timestep in selected_timesteps
+        )
 
     if kind not in {"line", "scatter"}:
         raise ValueError("kind must be 'line' or 'scatter'")
     if not 0 <= alpha <= 1:
         raise ValueError("alpha must be between 0 and 1.")
-    if isinstance(show_first_n_labels, (bool, np.bool_)) or not isinstance(
-        show_first_n_labels, (int, np.integer)
+    if show_first_n_labels is not None and (
+        isinstance(show_first_n_labels, (bool, np.bool_))
+        or not isinstance(show_first_n_labels, (int, np.integer))
     ):
-        raise TypeError("show_first_n_labels must be an integer.")
-    if show_first_n_labels < 0:
+        raise TypeError("show_first_n_labels must be an integer or None.")
+    if show_first_n_labels is not None and show_first_n_labels < 0:
         raise ValueError("show_first_n_labels must be non-negative.")
+    if isinstance(
+        expressibility_label_precision,
+        (bool, np.bool_),
+    ) or not isinstance(expressibility_label_precision, (int, np.integer)):
+        raise TypeError("expressibility_label_precision must be an integer.")
+    if expressibility_label_precision < 0:
+        raise ValueError("expressibility_label_precision must be non-negative.")
+    label_mode = str(label_by).strip().lower().replace("+", "_").replace("-", "_")
+    label_mode = {
+        "run_and_timestep": "run_timestep",
+        "expressibility_and_timestep": "expressibility_timestep",
+    }.get(label_mode, label_mode)
+    valid_label_modes = {
+        "auto",
+        "timestep",
+        "run",
+        "run_timestep",
+        "expressibility",
+        "expressibility_timestep",
+        "none",
+    }
+    if label_mode not in valid_label_modes:
+        raise ValueError(
+            "label_by must be 'auto', 'timestep', 'run', 'run_timestep', "
+            "'expressibility', 'expressibility_timestep', or 'none'."
+        )
+    if label_mode == "auto":
+        label_mode = (
+            "timestep"
+            if len(runs) == 1
+            else "run"
+            if all(count == 1 for count in selected_counts.values())
+            else "run_timestep"
+        )
     selected_iterations = _coerce_iteration_slice(iteration_slice)
+    excluded_iterations = _coerce_excluded_iterations(exclude_iterations)
     if y_limits is not None and y_percentile_limits is not None:
         raise ValueError(
             "Use either y_limits or y_percentile_limits, not both."
@@ -870,10 +989,10 @@ def plot_cost_histories(
     if series_labels is None:
         custom_series_labels = None
     elif isinstance(series_labels, str):
-        if len(selected_timesteps) != 1:
+        if len(selected_histories) != 1:
             raise ValueError(
                 "A single series label can only be used when exactly one "
-                f"timestep is plotted ({len(selected_timesteps)} found)."
+                f"trace is plotted ({len(selected_histories)} found)."
             )
         custom_series_labels = [series_labels]
     else:
@@ -884,11 +1003,42 @@ def plot_cost_histories(
                 "series_labels must be None, a string, or a sequence of "
                 "strings."
             ) from exc
-        if len(custom_series_labels) != len(selected_timesteps):
+        if len(custom_series_labels) != len(selected_histories):
             raise ValueError(
-                "series_labels must have one entry for each plotted timestep "
-                f"({len(selected_timesteps)} expected, "
+                "series_labels must have one entry for each plotted trace "
+                f"({len(selected_histories)} expected, "
                 f"{len(custom_series_labels)} received)."
+            )
+
+    expressibility_values: dict[int, float | None] = {}
+    if (
+        custom_series_labels is None
+        and show_first_n_labels != 0
+        and "expressibility" in label_mode
+    ):
+        if expression_runs is None:
+            discovered_expression_runs = []
+            for results_root in sorted(
+                {current_run.results_dir.parent for current_run in runs}
+            ):
+                discovered_expression_runs.extend(
+                    discover_expr_runs(results_root, include_full_runs=False)
+                )
+            expression_source = discovered_expression_runs
+        else:
+            expression_source = list(expression_runs)
+        expression_lookup = _expression_metric_lookup(expression_source)
+        for current_run in runs:
+            matched_metrics = expression_lookup.get(
+                (current_run.n, current_run.l, current_run.circuit),
+                {},
+            )
+            raw_expressibility = matched_metrics.get(
+                "Expressibility",
+                current_run.metadata("expressibility"),
+            )
+            expressibility_values[id(current_run)] = _expressibility_value(
+                raw_expressibility
             )
 
     if ax is None:
@@ -899,14 +1049,23 @@ def plot_cost_histories(
             fig.set_size_inches(figsize)
 
     processed_traces = []
-    for timestep in selected_timesteps:
-        y = np.asarray(available[timestep], dtype=float).ravel()
-        x = np.arange(y.size)[selected_iterations]
-        y = y[selected_iterations]
+    for current_run, timestep, values in selected_histories:
+        full_y = np.asarray(values, dtype=float).ravel()
+        x = np.arange(full_y.size)[selected_iterations]
+        y = full_y[selected_iterations]
+        if excluded_iterations:
+            resolved_exclusions = {
+                iteration if iteration >= 0 else full_y.size + iteration
+                for iteration in excluded_iterations
+            }
+            keep = ~np.isin(x, list(resolved_exclusions))
+            x = x[keep]
+            y = y[keep]
         if y.size == 0:
             raise ValueError(
-                f"iteration_slice selects no cost evaluations for timestep "
-                f"{timestep}."
+                f"iteration_slice and exclude_iterations select no cost "
+                f"evaluations for timestep "
+                f"{timestep} in run {current_run.full_label}."
             )
         if remove_outliers:
             y = mask_outliers(
@@ -927,24 +1086,50 @@ def plot_cost_histories(
                 method=smoothing_method,
                 centered=smoothing_centered,
             )
-        processed_traces.append((timestep, x, y))
+        processed_traces.append((current_run, timestep, x, y))
 
-    for series_index, (timestep, x, y) in enumerate(processed_traces):
-        label = (
-            custom_series_labels[series_index]
-            if custom_series_labels is not None
-            else f"timestep={timestep}"
-            if series_index < show_first_n_labels
-            else None
+    def automatic_trace_label(current_run: RunData, timestep: int) -> str | None:
+        if label_mode == "none":
+            return None
+        if label_mode == "timestep":
+            return f"timestep={timestep}"
+        if label_mode == "run":
+            return current_run.full_label
+        if label_mode == "run_timestep":
+            return f"{current_run.full_label}, timestep={timestep}"
+        value = expressibility_values.get(id(current_run))
+        value_text = (
+            "n/a"
+            if value is None or not np.isfinite(value)
+            else f"{value:.{int(expressibility_label_precision)}f}"
         )
+        label = f"Expr. = {value_text}"
+        if label_mode == "expressibility_timestep":
+            label += f", timestep={timestep}"
+        return label
+
+    labels_added = False
+    for series_index, (current_run, timestep, x, y) in enumerate(
+        processed_traces
+    ):
+        if custom_series_labels is not None:
+            label = custom_series_labels[series_index]
+        elif show_first_n_labels is None or series_index < show_first_n_labels:
+            label = automatic_trace_label(current_run, timestep)
+        else:
+            label = None
+        labels_added = labels_added or label is not None
         if kind == "scatter":
             ax.scatter(x, y, alpha=alpha, label=label)
         else:
             ax.plot(x, y, alpha=alpha, label=label)
 
-    ax.set_title(
-        f"Cost evolution ({run.full_label})" if title is None else title
+    default_title = (
+        f"Cost evolution ({runs[0].full_label})"
+        if len(runs) == 1
+        else f"Cost evolution ({len(runs)} runs)"
     )
+    ax.set_title(default_title if title is None else title)
     ax.set_xlabel("optimizer iteration" if x_label is None else x_label)
     normalized_labels = {
         "start_end": "normalized cost (1=start, 0=end)",
@@ -966,7 +1151,10 @@ def plot_cost_histories(
         ax.set_ylim(*y_limits)
     elif y_percentile_limits is not None:
         visible_values = np.concatenate(
-            [values[np.isfinite(values)] for _, _, values in processed_traces]
+            [
+                values[np.isfinite(values)]
+                for _, _, _, values in processed_traces
+            ]
         )
         if log_y:
             visible_values = visible_values[visible_values > 0]
@@ -982,15 +1170,21 @@ def plot_cost_histories(
             padding = max(abs(float(low)) * 0.05, 1e-12)
             low, high = low - padding, high + padding
         ax.set_ylim(float(low), float(high))
-    if custom_series_labels is not None or show_first_n_labels > 0:
+    if labels_added:
         ax.legend(ncol=2, fontsize=8)
     if show_final_error_metrics:
-        final_comparison = compare_run_timestep(run, timestep=-1)
-        metric_text = (
-            f"Target L2 err = {final_comparison['RelativeL2Error']:.2e}\n"
-            "Encoded L2 err = "
-            f"{final_comparison['EvolutionRelativeL2Error']:.2e}"
-        )
+        metric_blocks = []
+        for current_run in runs:
+            final_comparison = compare_run_timestep(current_run, timestep=-1)
+            metric_lines = [
+                f"Target L2 err = {final_comparison['RelativeL2Error']:.2e}",
+                "Encoded L2 err = "
+                f"{final_comparison['EvolutionRelativeL2Error']:.2e}",
+            ]
+            if len(runs) > 1:
+                metric_lines.insert(0, current_run.full_label)
+            metric_blocks.append("\n".join(metric_lines))
+        metric_text = "\n\n".join(metric_blocks)
         ax.text(
             0.98,
             0.98,
@@ -1037,9 +1231,9 @@ def plot_shots(
     return fig, ax
 
 
-def _expressibility_score(value: float | None) -> float | None:
-    """Convert the saved KL divergence to a higher-is-better score."""
-    return None if value is None else 1.0 - float(value)
+def _expressibility_value(value: float | None) -> float | None:
+    """Return the saved KL-divergence expressibility value unchanged."""
+    return None if value is None else float(value)
 
 
 def plot_expr_entcap_vs_l(
@@ -1051,7 +1245,7 @@ def plot_expr_entcap_vs_l(
     n_filter: int | Iterable[int] | None = None,
     figsize: tuple[float, float] | None = None,
 ):
-    """Plot circuit metrics, expressing expressibility as ``1 - D_KL``."""
+    """Plot the saved KL-divergence expressibility and entangling capability."""
     if not show_expressibility and not show_entangling_capability:
         raise ValueError("At least one metric must be selected.")
     allowed_n = None if n_filter is None else ({int(n_filter)} if isinstance(n_filter, int) else {int(x) for x in n_filter})
@@ -1064,7 +1258,7 @@ def plot_expr_entcap_vs_l(
                 "run": run,
                 "n": run.n,
                 "l": run.l,
-                "expressibility": _expressibility_score(
+                "expressibility": _expressibility_value(
                     run.metadata("expressibility")
                 ),
                 "entangling_capability": run.metadata("entangling_capability"),
@@ -1076,7 +1270,7 @@ def plot_expr_entcap_vs_l(
 
     metrics = []
     if show_expressibility:
-        metrics.append(("expressibility", "Expressibility score vs L"))
+        metrics.append(("expressibility", "Expressibility vs L"))
     if show_entangling_capability:
         metrics.append(("entangling_capability", "Entangling Capability vs L"))
     fig, axes = plt.subplots(
@@ -1102,7 +1296,7 @@ def plot_expr_entcap_vs_l(
         ax.set_title(title)
         ax.set_xlabel("L")
         ax.set_ylabel(
-            "Expressibility score (1 - KL divergence)"
+            "Expressibility (KL divergence)"
             if metric == "expressibility"
             else metric
         )
@@ -1872,8 +2066,8 @@ def build_run_records(
     are combined at the sample level before their variances are calculated.
     Independently saved expression-only runs are matched by ``(N, L, Circuit)``
     and take priority over metrics embedded in the simulation run. The
-    ``Expressibility`` output is ``1 - D_KL`` so larger values mean a more
-    expressive circuit; saved metadata remains unchanged.
+    ``Expressibility`` output is the saved KL divergence, so smaller values
+    mean a more expressive circuit.
     """
     exact_variance, n_l_variance = _variance_lookup(variance_runs)
     gradient_variances = _gradient_variance_lookup(gradient_runs)
@@ -1928,7 +2122,7 @@ def build_run_records(
                     column: matched_gradient_variances.get(column, np.nan)
                     for column in RUN_TABLE_GRADIENT_VARIANCE_COMPONENTS
                 },
-                "Expressibility": _expressibility_score(
+                "Expressibility": _expressibility_value(
                     matched_expression_metrics.get(
                         "Expressibility",
                         _float_or_nan(run.metadata("expressibility")),
@@ -2138,7 +2332,7 @@ def plot_run_table(
         else:
             ax.plot(group[x], group[y_column], marker="o", label=label)
     metric_axis_labels = {
-        "Expressibility": "Expressibility score (1 - KL divergence)",
+        "Expressibility": "Expressibility (KL divergence)",
     }
     default_x_label = metric_axis_labels.get(x, x)
     ax.set_xlabel(default_x_label if x_label is None else x_label)
@@ -2455,20 +2649,35 @@ def filter_gradient_table(
     ls: Iterable[int] | int | None = None,
     circuits: Iterable[str] | str | None = None,
     initial_states: Iterable[str] | str | None = None,
+    filters: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Filter a run-level or parameter-level gradient statistics table."""
+    """Filter gradient statistics by standard fields or arbitrary columns."""
     filtered = _as_table(table)
-    for column, selected in (
+    selections = [
         ("n", ns),
         ("l", ls),
         ("circuit", circuits),
         ("initial_state", initial_states),
-    ):
+    ]
+    if filters is not None:
+        if not isinstance(filters, Mapping):
+            raise TypeError("filters must be a mapping from column names to allowed values.")
+        selections.extend(filters.items())
+    for column, selected in selections:
         if selected is None:
             continue
         if column not in filtered.columns:
-            raise KeyError(f"Gradient table has no {column!r} column.")
-        allowed = {selected} if isinstance(selected, (str, int, np.integer)) else set(selected)
+            raise KeyError(
+                f"Unknown gradient filter column {column!r}. "
+                f"Available columns: {list(filtered.columns)}"
+            )
+        if isinstance(selected, (str, bytes)) or np.isscalar(selected):
+            allowed = [selected]
+        else:
+            try:
+                allowed = list(selected)
+            except TypeError:
+                allowed = [selected]
         filtered = filtered[filtered[column].isin(allowed)]
     return filtered.reset_index(drop=True)
 
@@ -2500,6 +2709,9 @@ def _plot_gradient_table(
     x_label: str | None = None,
     y_label: str | None = None,
     figsize: tuple[float, float] | None = None,
+    series_labels: str | Sequence[str] | None = None,
+    x_limits: tuple[float | None, float | None] | None = None,
+    y_limits: tuple[float | None, float | None] | None = None,
 ):
     y_columns = _gradient_y_columns(y)
     for column in (x, *y_columns):
@@ -2527,6 +2739,7 @@ def _plot_gradient_table(
             fig.set_size_inches(figsize)
 
     multiple_y = len(y_columns) > 1
+    series_specs = []
     for y_column in y_columns:
         metric_table = filtered.dropna(subset=[y_column])
         if group_columns:
@@ -2536,6 +2749,36 @@ def _plot_gradient_table(
             grouped = [(None, metric_table)]
         for group_value, group in grouped:
             group = group.sort_values(x, kind="stable")
+            series_specs.append((y_column, group_value, group))
+
+    if series_labels is None:
+        custom_series_labels = None
+    elif isinstance(series_labels, str):
+        if len(series_specs) != 1:
+            raise ValueError(
+                "A single series label can only be used when exactly one "
+                f"series is plotted ({len(series_specs)} found)."
+            )
+        custom_series_labels = [series_labels]
+    else:
+        try:
+            custom_series_labels = [str(label) for label in series_labels]
+        except TypeError as exc:
+            raise TypeError(
+                "series_labels must be None, a string, or a sequence of "
+                "strings."
+            ) from exc
+        if len(custom_series_labels) != len(series_specs):
+            raise ValueError(
+                "series_labels must have one entry for each plotted series "
+                f"({len(series_specs)} expected, "
+                f"{len(custom_series_labels)} received)."
+            )
+
+    for series_index, (y_column, group_value, group) in enumerate(series_specs):
+        if custom_series_labels is not None:
+            label = custom_series_labels[series_index]
+        else:
             label_parts = [y_column] if multiple_y else []
             if group_columns:
                 values = group_value if isinstance(group_value, tuple) else (group_value,)
@@ -2544,10 +2787,10 @@ def _plot_gradient_table(
                     for column, value in zip(group_columns, values)
                 )
             label = ", ".join(label_parts) or None
-            if kind == "scatter":
-                ax.scatter(group[x], group[y_column], label=label)
-            else:
-                ax.plot(group[x], group[y_column], marker="o", label=label)
+        if kind == "scatter":
+            ax.scatter(group[x], group[y_column], label=label)
+        else:
+            ax.plot(group[x], group[y_column], marker="o", label=label)
 
     ax.set_xlabel(x if x_label is None else x_label)
     default_y_label = y_columns[0] if not multiple_y else "Value"
@@ -2559,7 +2802,11 @@ def _plot_gradient_table(
         ax.set_xscale("log")
     if log_y:
         ax.set_yscale("log")
-    if group_columns or multiple_y:
+    if x_limits is not None:
+        ax.set_xlim(*x_limits)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    if custom_series_labels is not None or group_columns or multiple_y:
         ax.legend()
     return filtered, ax, fig
 
@@ -2580,27 +2827,35 @@ def plot_gradient_run_table(
     x_label: str | None = None,
     y_label: str | None = None,
     figsize: tuple[float, float] | None = None,
+    filters: Mapping[str, Any] | None = None,
+    series_labels: str | Sequence[str] | None = None,
+    x_limits: tuple[float | None, float | None] | None = None,
+    y_limits: tuple[float | None, float | None] | None = None,
 ):
-    """Plot one or more overall-gradient columns with filters and grouping."""
+    """Plot overall-gradient columns with general filters and styling."""
     filtered = filter_gradient_table(
         table,
         ns=ns,
         ls=ls,
         circuits=circuits,
         initial_states=initial_states,
+        filters=filters,
     )
     return _plot_gradient_table(
-        filtered,
-        x,
-        y,
-        group_by,
-        kind,
-        log_x,
-        log_y,
-        ax,
+        table=filtered,
+        x=x,
+        y=y,
+        group_by=group_by,
+        kind=kind,
+        log_x=log_x,
+        log_y=log_y,
+        ax=ax,
         x_label=x_label,
         y_label=y_label,
         figsize=figsize,
+        series_labels=series_labels,
+        x_limits=x_limits,
+        y_limits=y_limits,
     )
 
 
@@ -2689,6 +2944,10 @@ def plot_gradient_parameter_table(
     x_label: str | None = None,
     y_label: str | None = None,
     figsize: tuple[float, float] | None = None,
+    filters: Mapping[str, Any] | None = None,
+    series_labels: str | Sequence[str] | None = None,
+    x_limits: tuple[float | None, float | None] | None = None,
+    y_limits: tuple[float | None, float | None] | None = None,
 ):
     """Plot one or more selected scalar-parameter gradient statistics.
 
@@ -2701,20 +2960,24 @@ def plot_gradient_parameter_table(
         ls=ls,
         circuits=circuits,
         initial_states=initial_states,
+        filters=filters,
     )
     selected = _select_gradient_parameters(filtered, parameters)
     return _plot_gradient_table(
-        selected,
-        x,
-        y,
-        group_by,
-        kind,
-        log_x,
-        log_y,
-        ax,
+        table=selected,
+        x=x,
+        y=y,
+        group_by=group_by,
+        kind=kind,
+        log_x=log_x,
+        log_y=log_y,
+        ax=ax,
         x_label=x_label,
         y_label=y_label,
         figsize=figsize,
+        series_labels=series_labels,
+        x_limits=x_limits,
+        y_limits=y_limits,
     )
 
 
