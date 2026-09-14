@@ -58,10 +58,10 @@ class SimConfig:
     expr_entcap_samples: int = 100000
     expr_bins: int = 100
 
-    # Spend a one-off search budget on each distinct contraction topology,
-    # then reuse the selected positional path for every parameter update and
-    # time step. The cache is independent of the chosen initial state.
-    optimize_contraction_paths: bool = True
+    # Experimental only: cached positional paths can be invalid after Quimb
+    # reconstructs or simplifies a network. Automatic per-network path
+    # selection is the safe release default and was used for the thesis runs.
+    optimize_contraction_paths: bool = False
     contraction_path_repeats: int = 256
     contraction_path_max_time_s: float | None = 60.0
     contraction_path_seed: int = 0
@@ -74,7 +74,7 @@ class SimConfig:
     # Requested number of scalar parameter gradients. Gradient mode rounds this
     # down to the nearest complete random-parameter sweep.
     gradient_tries: int | None = None
-    
+
     initial_params: tuple[float, ...] | None = None
     initial_params_presets_file: str = "initial_params_presets.yaml"
     initial_params_variant: str | None = None

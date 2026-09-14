@@ -9,6 +9,8 @@
 !*.ipynb
 !initial_params_presets.yaml
 !requirements.txt
+!README.md
+!CITATION.cff
 
 # Track this ignore file so the rule is shared
 !.gitignore

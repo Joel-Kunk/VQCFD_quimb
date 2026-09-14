@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 import time
+import warnings
 
 import cotengra
 import numpy as np
@@ -36,6 +37,19 @@ class RuntimeContext:
     unitary_circuit: str
     contraction_paths: fcp.ContractionPathSet | None = None
     pure_state_path: fcp.ContractionPathSet | None = None
+
+
+_EXPERIMENTAL_PATH_WARNING = (
+    "Cached positional contraction paths are experimental and were not used "
+    "for the thesis results. Reconstructed or simplified Quimb networks can "
+    "change tensor order, which can make a saved positional path unsafe. "
+    "Use automatic contraction unless you have independently validated the "
+    "path against every reconstructed network."
+)
+
+
+def _warn_experimental_contraction_paths() -> None:
+    warnings.warn(_EXPERIMENTAL_PATH_WARNING, RuntimeWarning, stacklevel=2)
 
 
 def format_elapsed(seconds: float) -> str:
@@ -183,6 +197,7 @@ def _prepare_local_contraction_paths(
 ) -> fcp.ContractionPathSet | None:
     if not cfg.optimize_contraction_paths:
         return None
+    _warn_experimental_contraction_paths()
 
     # Use deterministic, non-special values so simplification exposes the
     # generic topology shared by every parameter update and initial state.
@@ -251,6 +266,7 @@ def _prepare_pure_state_path(
 ) -> fcp.ContractionPathSet | None:
     if not cfg.optimize_contraction_paths:
         return None
+    _warn_experimental_contraction_paths()
     if rt is not None and rt.pure_state_path is not None:
         return rt.pure_state_path
 
@@ -893,7 +909,7 @@ def run_simulation(cfg: SimConfig) -> SimState:
     if cfg.verbose:
         print(cfg.dir_label)
         print(cfg.label)
-        
+
     if cfg.mode == "gradient":
         return run_gradient_analysis(cfg)
     if cfg.mode == "exp_only":

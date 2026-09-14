@@ -24,11 +24,19 @@ class ContractionPathTests(unittest.TestCase):
             l=1,
             unitary_circuit="mps_staircase_light",
             verbose=False,
+            optimize_contraction_paths=True,
             contraction_path_repeats=2,
             contraction_path_max_time_s=2.0,
             contraction_path_cache_dir=cache_dir,
             contraction_path_seed=7,
         )
+
+    def test_optimized_paths_are_disabled_by_default(self):
+        cfg = SimConfig(n=2, l=1, verbose=False)
+        rt = build_runtime(cfg, plot_circuit=False)
+        self.assertFalse(cfg.optimize_contraction_paths)
+        self.assertIsNone(_prepare_local_contraction_paths(cfg, rt))
+        self.assertIsNone(_prepare_pure_state_path(cfg, rt))
 
     def test_local_paths_match_auto_and_work_with_autograd(self):
         with tempfile.TemporaryDirectory() as cache_dir:

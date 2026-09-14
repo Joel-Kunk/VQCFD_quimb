@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the archived thesis release."
+type: software-code
+title: "VQCFD_quimb: tensor-network emulation of a variational quantum Burgers solver"
+authors:
+  - family-names: Kunkel
+    given-names: Joel
+abstract: >-
+  Research code for simulating variational quantum algorithms for the
+  one-dimensional viscous Burgers equation with Quimb tensor networks.
+keywords:
+  - variational quantum algorithms
+  - Burgers equation
+  - tensor networks
+  - Quimb
