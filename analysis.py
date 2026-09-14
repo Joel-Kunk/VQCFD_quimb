@@ -829,8 +829,9 @@ def plot_cost_histories(
     ``label_by`` accepts ``"auto"``, ``"timestep"``, ``"run"``,
     ``"run_timestep"``, ``"expressibility"``,
     ``"expressibility_timestep"``, or ``"none"``. Expressibility labels use
-    the saved KL divergence and prefer independently saved expression-only
-    results over metrics embedded in full runs.
+    the saved KL divergence. They search both expression-only and full runs.
+    For non-sine simulations, the corresponding sine-state result takes
+    priority, with an exact-state result used only when no sine value exists.
 
     ``exclude_iterations`` removes selected zero-based optimizer-iteration
     indices while preserving the remaining x coordinates. Thus, excluding
@@ -1022,16 +1023,19 @@ def plot_cost_histories(
                 {current_run.results_dir.parent for current_run in runs}
             ):
                 discovered_expression_runs.extend(
-                    discover_expr_runs(results_root, include_full_runs=False)
+                    discover_expr_runs(results_root, include_full_runs=True)
                 )
             expression_source = discovered_expression_runs
         else:
             expression_source = list(expression_runs)
         expression_lookup = _expression_metric_lookup(expression_source)
         for current_run in runs:
-            matched_metrics = expression_lookup.get(
-                (current_run.n, current_run.l, current_run.circuit),
-                {},
+            matched_metrics = _matching_expression_metrics(
+                expression_lookup,
+                n=current_run.n,
+                layers=current_run.l,
+                circuit=current_run.circuit,
+                initial_state=current_run.initial_state,
             )
             raw_expressibility = matched_metrics.get(
                 "Expressibility",
@@ -1969,21 +1973,21 @@ def _gradient_variance_lookup(
 
 def _expression_metric_lookup(
     expression_runs: Iterable[RunData | Mapping[str, Any]] | None,
-) -> dict[tuple[int, int, str], dict[str, float]]:
-    """Index independently saved expression metrics by circuit configuration.
+) -> dict[tuple[int, int, str, str], dict[str, float]]:
+    """Index saved expression metrics by circuit and initial state.
 
-    Expressibility and entangling capability depend on the ansatz rather than
-    the simulation's initial state, so the lookup key is ``(N, L, Circuit)``.
-    If several independent metric runs share a key, their estimates are
-    averaged, weighted by ``expr_entcap_samples`` when every run records it.
+    If several metric runs share a key, their estimates are averaged, weighted
+    by ``expr_entcap_samples`` when every run records it. Expression-only files
+    without initial-state metadata use the configured default initial state.
     """
     grouped: defaultdict[
-        tuple[int, int, str],
+        tuple[int, int, str, str],
         list[tuple[float | None, float | None, int | None]],
     ] = defaultdict(list)
     for item in expression_runs or []:
         if isinstance(item, RunData):
             n, layers, circuit = item.n, item.l, item.circuit
+            initial_state = item.initial_state
             expressibility = item.metadata("expressibility")
             entangling_capability = item.metadata("entangling_capability")
             samples = item.metadata("expr_entcap_samples")
@@ -1997,6 +2001,12 @@ def _expression_metric_lookup(
                 (values, ("resolved_unitary_circuit", "unitary_circuit", "circuit")),
                 (manifest, ("resolved_unitary_circuit", "unitary_circuit", "circuit")),
                 default=fcq.DEFAULT_UNITARY_CIRCUIT,
+            )
+            initial_state = _first_present(
+                (item, ("initial_state", "resolved_initial_state")),
+                (values, ("resolved_initial_state", "initial_state")),
+                (manifest, ("resolved_initial_state", "initial_state")),
+                default=fist.DEFAULT_INITIAL_STATE,
             )
             expressibility = _first_present(
                 (item, ("expressibility",)),
@@ -2017,7 +2027,14 @@ def _expression_metric_lookup(
             continue
         if expressibility is None and entangling_capability is None:
             continue
-        grouped[(int(n), int(layers), str(circuit))].append(
+        grouped[
+            (
+                int(n),
+                int(layers),
+                str(circuit),
+                fist.resolve_initial_state(initial_state),
+            )
+        ].append(
             (
                 None if expressibility is None else float(expressibility),
                 None if entangling_capability is None else float(entangling_capability),
@@ -2050,6 +2067,30 @@ def _expression_metric_lookup(
     return lookup
 
 
+def _matching_expression_metrics(
+    lookup: Mapping[tuple[int, int, str, str], Mapping[str, float]],
+    n: int | None,
+    layers: int | None,
+    circuit: str,
+    initial_state: str,
+) -> dict[str, float]:
+    """Prefer matching sine metrics for non-sine simulations.
+
+    Expressibility is a property of the ansatz, so a non-sine simulation can
+    reuse measurements saved for the same ``(N, L, Circuit)`` with the sine
+    initial state. Exact-state values are retained when a sine value is absent.
+    """
+    if n is None or layers is None:
+        return {}
+    configuration = (int(n), int(layers), str(circuit))
+    resolved_state = fist.resolve_initial_state(initial_state)
+    sine_state = fist.resolve_initial_state("sine")
+    matched = dict(lookup.get((*configuration, resolved_state), {}))
+    if resolved_state != sine_state:
+        matched.update(lookup.get((*configuration, sine_state), {}))
+    return matched
+
+
 def build_run_records(
     runs: Sequence[RunData],
     variance_runs: Iterable[RunData | Mapping[str, Any]] | None = None,
@@ -2064,8 +2105,10 @@ def build_run_records(
     variance runs for the same configuration are averaged. Raw gradient runs are
     matched exactly by ``(N, L, Circuit, InitialState)``; repeated matching runs
     are combined at the sample level before their variances are calculated.
-    Independently saved expression-only runs are matched by ``(N, L, Circuit)``
-    and take priority over metrics embedded in the simulation run. The
+    Expression metrics are matched by ``(N, L, Circuit, InitialState)``. For a
+    non-sine simulation, a matching sine-state metric takes priority; its own
+    state is used when no sine metric exists. Supplied expression runs take
+    priority over metrics embedded in the simulation run. The
     ``Expressibility`` output is the saved KL divergence, so smaller values
     mean a more expressive circuit.
     """
@@ -2085,8 +2128,12 @@ def build_run_records(
         matched_gradient_variances = gradient_variances.get(
             (run.n, run.l, circuit, run.initial_state), {}
         )
-        matched_expression_metrics = expression_metrics.get(
-            (run.n, run.l, circuit), {}
+        matched_expression_metrics = _matching_expression_metrics(
+            expression_metrics,
+            n=run.n,
+            layers=run.l,
+            circuit=circuit,
+            initial_state=run.initial_state,
         )
         optimization_summary = optimization_step_summary(run)
         metrics = {
