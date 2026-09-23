@@ -42,8 +42,8 @@ def main() -> None:
 
     state = run_simulation(cfg)
     values_path = cfg.data_dir / f"values_{cfg.full_label}.yaml"
-    if len(state.params_list_quimb) != 2:
-        raise RuntimeError("Smoke run did not complete its single timestep.")
+    if len(state.params_list_quimb) != cfg.n_timesteps + 1:
+        raise RuntimeError("Smoke run did not complete the configured timesteps.")
     if not cfg.manifest_path.exists() or not values_path.exists():
         raise RuntimeError("Smoke run did not write the expected output files.")
 

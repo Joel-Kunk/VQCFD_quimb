@@ -13,3 +13,7 @@ keywords:
   - Burgers equation
   - tensor networks
   - Quimb
+license: MIT
+repository-code: "https://github.com/Joel-Kunk/VQCFD_quimb"
+version: "thesis-v1.0"
+date-released: 2026-09-23

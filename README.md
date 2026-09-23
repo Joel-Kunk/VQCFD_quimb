@@ -38,7 +38,7 @@ python smoke_test.py
 ```
 
 The smoke test evolves the default (N=3, L=2) circuit on eight grid points for
-one timestep. It normally takes only a few seconds and writes ignored test
+ten timesteps. It normally takes only a few seconds and writes ignored test
 output below `results/results_smoke/`. It checks that the preset can be loaded,
 the noise-free optimizer completes, and the manifest and result files are written.
 It is a runtime check, not a converged scientific experiment.
@@ -153,7 +153,7 @@ experimental caches and are not part of the release.
 
 ```text
 run.py                              editable simulation campaigns
-smoke_test.py                       one-step end-to-end runtime check
+smoke_test.py                       ten-step end-to-end runtime check
 sim_config.py                       simulation configuration and validation
 simulation_runner.py                execution and output workflow
 sim_state.py                        evolving simulation state
@@ -179,6 +179,26 @@ identifier such as a Zenodo DOI. Add the final repository URL, version, release
 date, and DOI to `CITATION.cff`. Cite the version-specific archive rather than a
 moving branch.
 
-The code is currently prepared for citation but no reuse license is selected in
-this repository. Add the license agreed with the author and supervisors before
-making the release public.
+## License
+
+The original source code and accompanying software documentation are licensed
+under the [MIT License](LICENSE), copyright (c) 2026 Joel Kunkel. Third-party
+dependencies retain their own licenses. Please cite the archived thesis release
+using `CITATION.cff` when using this work in research.
+
+Results distributed in a separate data archive should state their own data
+license; this software license does not select a license for that deposit.
+
+## Thesis software snapshot
+
+The `thesis-v1.0` tag identifies the source and analysis snapshot accompanying
+the thesis. Analysis notebooks retain all original cells and plot settings;
+saved outputs are cleared. Run their setup cells before the required analysis
+sections. Some cells are alternative plotting presets rather than a Run All
+pipeline.
+
+This software release includes source, runners, tests, dependency specifications,
+analysis notebooks and helpers, and software documentation. Generated simulation
+data, run manifests, figures, caches, environments, and local backups are excluded.
+Restore selected result data separately using the relative paths in the notebooks.
+The result-data archive and software DOI have not yet been published.

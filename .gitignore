@@ -1,16 +1,29 @@
-# Ignore everything by default
-*
+# Software-release allowlist. Generated results remain local.
+/*
 
-# Allow traversing directories
-!*/
+!/.gitignore
+!/CITATION.cff
+!/LICENSE
+!/README.md
+!/analysis.py
+!/analysis_results.ipynb
+!/analysis_variance.ipynb
+!/generate_initial_params_presets.py
+!/initial_params_presets.yaml
+!/requirements.txt
+!/run.py
+!/sim_config.py
+!/sim_state.py
+!/simulation_runner.py
+!/smoke_test.py
+!/functions/
+/functions/*
+!/functions/*.py
+!/tests/
+/tests/*
+!/tests/*.py
 
-# Track Python source files
-!*.py
-!*.ipynb
-!initial_params_presets.yaml
-!requirements.txt
-!README.md
-!CITATION.cff
-
-# Track this ignore file so the rule is shared
-!.gitignore
+# Ignore notebook checkpoints and Python bytecode everywhere
+**/.ipynb_checkpoints/
+**/__pycache__/
+*.pyc
